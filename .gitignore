@@ -7,3 +7,4 @@ coverage/
 .DS_Store
 .vitest/
 *.tsbuildinfo
+test-run.txt

@@ -56,14 +56,40 @@ function serializeValue(value: CleanedWhere["value"]): SqlParameterValue {
 }
 
 function isInsensitiveStringClause(clause: CleanedWhere): boolean {
-	return clause.mode === "insensitive" && typeof clause.value === "string";
+	if (clause.mode !== "insensitive") {
+		return false;
+	}
+	if (typeof clause.value === "string") {
+		return true;
+	}
+	return (
+		Array.isArray(clause.value) &&
+		clause.value.every((entry) => typeof entry === "string")
+	);
 }
+
+/** Cosmos has no case-insensitive ARRAY_CONTAINS, so both sides are lowered. */
+function lowerValue(value: CleanedWhere["value"]): CleanedWhere["value"] {
+	if (typeof value === "string") {
+		return value.toLowerCase();
+	}
+	if (Array.isArray(value)) {
+		return value.map((entry) =>
+			typeof entry === "string" ? entry.toLowerCase() : entry,
+		) as string[] | number[];
+	}
+	return value;
+}
+
+/** Maps a schema field name to the name it is stored under. */
+export type FieldMapper = (field: string) => string;
 
 function clauseToSql(
 	clause: CleanedWhere,
 	collector: ParameterCollector,
+	mapField: FieldMapper,
 ): string {
-	const path = quoteFieldPath(clause.field);
+	const path = quoteFieldPath(mapField(clause.field));
 	const insensitive = isInsensitiveStringClause(clause);
 	const caseArgument = insensitive ? ", true" : "";
 	const operator = clause.operator ?? "eq";
@@ -86,9 +112,13 @@ function clauseToSql(
 		case "gte":
 			return `${path} >= ${collector.bind(clause.value)}`;
 		case "in":
-			return `ARRAY_CONTAINS(${collector.bind(clause.value)}, ${path})`;
+			return insensitive
+				? `ARRAY_CONTAINS(${collector.bind(lowerValue(clause.value))}, LOWER(${path}))`
+				: `ARRAY_CONTAINS(${collector.bind(clause.value)}, ${path})`;
 		case "not_in":
-			return `NOT ARRAY_CONTAINS(${collector.bind(clause.value)}, ${path})`;
+			return insensitive
+				? `NOT ARRAY_CONTAINS(${collector.bind(lowerValue(clause.value))}, LOWER(${path}))`
+				: `NOT ARRAY_CONTAINS(${collector.bind(clause.value)}, ${path})`;
 		case "contains":
 			return `CONTAINS(${path}, ${collector.bind(clause.value)}${caseArgument})`;
 		case "starts_with":
@@ -111,12 +141,13 @@ function clauseToSql(
 export function buildWherePredicate(
 	where: readonly CleanedWhere[],
 	collector: ParameterCollector,
+	mapField: FieldMapper,
 ): string {
 	const conjunctions: string[] = [];
 	const disjunctions: string[] = [];
 
 	for (const clause of where) {
-		const text = clauseToSql(clause, collector);
+		const text = clauseToSql(clause, collector, mapField);
 		if (clause.connector === "OR") {
 			disjunctions.push(text);
 		} else {

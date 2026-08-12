@@ -6,7 +6,6 @@ services:
     container_name: better-auth-cosmos-emulator
     ports:
       - "8081:8081"
-      - "1234:1234"
     environment:
       PROTOCOL: https
     healthcheck:
