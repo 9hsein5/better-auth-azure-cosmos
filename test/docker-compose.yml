@@ -1,0 +1,17 @@
+services:
+  cosmos:
+    # vnext-preview is the Linux emulator build that supports hierarchical
+    # partition keys, which the single-container layout depends on.
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview
+    container_name: better-auth-cosmos-emulator
+    ports:
+      - "8081:8081"
+      - "1234:1234"
+    environment:
+      PROTOCOL: https
+    healthcheck:
+      test: ["CMD-SHELL", "curl -ksf https://localhost:8081/_explorer/emulator.pem > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
