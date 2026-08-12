@@ -1,0 +1,55 @@
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      cosmos:
+        image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview
+        ports:
+          - 8081:8081
+        env:
+          PROTOCOL: https
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Wait for the emulator
+        run: |
+          for i in $(seq 1 60); do
+            if curl -ksf https://localhost:8081/_explorer/emulator.pem > /dev/null; then
+              echo "emulator ready"; exit 0
+            fi
+            sleep 5
+          done
+          echo "emulator did not become ready"; exit 1
+      - run: npm test
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for provenance attestation.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
