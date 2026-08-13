@@ -124,8 +124,13 @@ async function queryDocuments(
 ): Promise<StoredAuthDocument[]> {
 	const container: Container = layout.container(model);
 	const spec = buildQuery(layout, model, shape, mapField);
+	// Neither layout binds a complete partition key here: single-container
+	// queries bind only the model prefix, while per-model queries leave /id
+	// unbound. Fetch the cross-partition query plan immediately instead of first
+	// attempting the gateway path, which fails and retries with a query plan.
+	// This helper never combines forceQueryPlan with the partitionKey option.
 	const response = await container.items
-		.query<StoredAuthDocument>(spec)
+		.query<StoredAuthDocument>(spec, { forceQueryPlan: true })
 		.fetchAll();
 	return response.resources;
 }
