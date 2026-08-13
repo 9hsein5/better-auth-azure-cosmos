@@ -1,5 +1,8 @@
 # better-auth-azure-cosmos
 
+[![npm version](https://img.shields.io/npm/v/better-auth-azure-cosmos.svg)](https://www.npmjs.com/package/better-auth-azure-cosmos)
+[![Better Auth community adapter](https://img.shields.io/badge/Better_Auth-community_adapter-000000)](https://better-auth.com/docs/adapters/community-adapters)
+
 An [Azure Cosmos DB for NoSQL](https://learn.microsoft.com/azure/cosmos-db/nosql/) adapter for [Better Auth](https://better-auth.com).
 
 Cosmos DB for NoSQL is not one of Better Auth's built-in adapters. This package implements the
