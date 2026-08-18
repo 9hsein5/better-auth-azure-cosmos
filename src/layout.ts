@@ -7,15 +7,21 @@ import {
 	ACCOUNT_ISSUER_FIELD,
 	ACCOUNT_KEY_HASH_FIELD,
 	ACCOUNT_MODEL,
+	RATE_LIMIT_KEY_FIELD,
+	RATE_LIMIT_KEY_HASH_FIELD,
+	RATE_LIMIT_MODEL,
 	SESSION_MODEL,
 	SESSION_TOKEN_FIELD,
 	SESSION_TOKEN_HASH_FIELD,
 	accountKeyHashOf,
 	deriveSessionTokenHash,
 	hashAccountKey,
+	hashRateLimitKey,
 	hashSessionToken,
+	rateLimitKeyHashOf,
 	sessionTokenHashOf,
 	type AccountPartitionStrategy,
+	type RateLimitPartitionStrategy,
 	type SessionPartitionStrategy,
 } from "./partition";
 
@@ -76,6 +82,14 @@ export type CosmosLayoutOptions =
 			 * is created, so this must be chosen up front.
 			 */
 			readonly accountPartition?: AccountPartitionStrategy;
+		/**
+		 * Partition strategy for the `rateLimit` container. `key` partitions on `/keyHash`,
+		 * a SHA-256 of the limiter key, and declares `key` unique within that partition.
+		 * Without it two concurrent first requests each seed their own counter row and the
+		 * effective limit is multiplied; with it the second seed is rejected and Better Auth
+		 * re-reads and increments the existing row.
+		 */
+		readonly rateLimitPartition?: RateLimitPartitionStrategy;
 	  };
 
 export type CosmosLayout = {
@@ -154,6 +168,24 @@ function sessionScopesOf(where: readonly CleanedWhere[]): readonly PartitionKey[
 	return null;
 }
 
+function rateLimitScopesOf(where: readonly CleanedWhere[]): readonly PartitionKey[] | null {
+	for (const clause of where) {
+		if (clause.connector === "OR" || clause.mode === "insensitive") {
+			continue;
+		}
+		if ((clause.operator ?? "eq") !== "eq" || typeof clause.value !== "string") {
+			continue;
+		}
+		if (clause.field === RATE_LIMIT_KEY_HASH_FIELD) {
+			return [clause.value];
+		}
+		if (clause.field === RATE_LIMIT_KEY_FIELD) {
+			return [hashRateLimitKey(clause.value)];
+		}
+	}
+	return null;
+}
+
 function accountScopesOf(where: readonly CleanedWhere[]): readonly PartitionKey[] | null {
 	let issuer: string | null = null;
 	let accountId: string | null = null;
@@ -191,8 +223,11 @@ export function resolveLayout(
 		const nameFor = options.containerName ?? ((model: string) => model);
 		const hashesSessions = options.sessionPartition === "tokenHash";
 		const hashesAccounts = options.accountPartition === "accountKey";
+		const hashesRateLimits = options.rateLimitPartition === "key";
 		const isHashedAccount = (model: string): boolean => hashesAccounts && model === ACCOUNT_MODEL;
 		const isHashedSession = (model: string): boolean => hashesSessions && model === SESSION_MODEL;
+		const isHashedRateLimit = (model: string): boolean =>
+			hashesRateLimits && model === RATE_LIMIT_MODEL;
 
 		return {
 			container: (model) => database.container(nameFor(model)),
@@ -202,6 +237,15 @@ export function resolveLayout(
 					if (hash === null) {
 						throw new Error(
 							"The account container is partitioned by /accountKeyHash, but the document carries neither an accountKeyHash nor an issuer and accountId.",
+						);
+					}
+					return hash;
+				}
+				if (isHashedRateLimit(model)) {
+					const hash = rateLimitKeyHashOf(document);
+					if (hash === null) {
+						throw new Error(
+							"The rateLimit container is partitioned by /keyHash, but the document carries neither a keyHash nor a key.",
 						);
 					}
 					return hash;
@@ -222,6 +266,10 @@ export function resolveLayout(
 					const hash = accountKeyHashOf(data);
 					return hash === null ? {} : { [ACCOUNT_KEY_HASH_FIELD]: hash };
 				}
+				if (isHashedRateLimit(model)) {
+					const hash = rateLimitKeyHashOf(data);
+					return hash === null ? {} : { [RATE_LIMIT_KEY_HASH_FIELD]: hash };
+				}
 				if (!isHashedSession(model)) {
 					return {};
 				}
@@ -232,18 +280,31 @@ export function resolveLayout(
 				if (isHashedSession(model)) {
 					return sessionScopesOf(where);
 				}
+				if (isHashedRateLimit(model)) {
+					return rateLimitScopesOf(where);
+				}
 				return isHashedAccount(model) ? accountScopesOf(where) : null;
 			},
-			addressableById: (model) => !isHashedSession(model) && !isHashedAccount(model),
-			enforcesUnique: (model, fields) =>
-				isHashedAccount(model) &&
-				fields.length === ACCOUNT_KEY_FIELDS.length &&
-				ACCOUNT_KEY_FIELDS.every((field) => fields.includes(field)),
+			addressableById: (model) =>
+				!isHashedSession(model) && !isHashedAccount(model) && !isHashedRateLimit(model),
+			enforcesUnique: (model, fields) => {
+				if (isHashedRateLimit(model)) {
+					return fields.length === 1 && fields[0] === RATE_LIMIT_KEY_FIELD;
+				}
+				return (
+					isHashedAccount(model) &&
+					fields.length === ACCOUNT_KEY_FIELDS.length &&
+					ACCOUNT_KEY_FIELDS.every((field) => fields.includes(field))
+				);
+			},
 			requiredContainers: (models) =>
 				models.map((model) => ({
 					id: nameFor(model),
 					// The unique key is only enforceable because the partition key is derived from
 					// exactly these paths, so every colliding row shares one logical partition.
+					...(isHashedRateLimit(model)
+						? { uniqueKeyPolicy: { uniqueKeys: [{ paths: [`/${RATE_LIMIT_KEY_FIELD}`] }] } }
+						: {}),
 					...(isHashedAccount(model)
 						? {
 								uniqueKeyPolicy: {
@@ -257,6 +318,8 @@ export function resolveLayout(
 						paths: [
 						isHashedSession(model)
 							? `/${SESSION_TOKEN_HASH_FIELD}`
+							: isHashedRateLimit(model)
+								? `/${RATE_LIMIT_KEY_HASH_FIELD}`
 							: isHashedAccount(model)
 								? `/${ACCOUNT_KEY_HASH_FIELD}`
 								: "/id",
@@ -268,6 +331,7 @@ export function resolveLayout(
 			reservedFields: [
 				...(hashesSessions ? [SESSION_TOKEN_HASH_FIELD] : []),
 				...(hashesAccounts ? [ACCOUNT_KEY_HASH_FIELD] : []),
+				...(hashesRateLimits ? [RATE_LIMIT_KEY_HASH_FIELD] : []),
 			],
 		};
 	}

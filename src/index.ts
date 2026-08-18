@@ -12,9 +12,12 @@ export {
 export type { AuthDocument, AuthFieldValue, StoredAuthDocument } from "./document";
 export {
 	ACCOUNT_KEY_HASH_FIELD,
+	RATE_LIMIT_KEY_HASH_FIELD,
 	SESSION_TOKEN_HASH_FIELD,
 	hashAccountKey,
+	hashRateLimitKey,
 	hashSessionToken,
 	type AccountPartitionStrategy,
+	type RateLimitPartitionStrategy,
 	type SessionPartitionStrategy,
 } from "./partition";

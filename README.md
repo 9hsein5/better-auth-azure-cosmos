@@ -153,6 +153,16 @@ Both a partition key and a unique key policy are **immutable after a container i
 is a decision to make before `ensureAuthContainers` first runs. `single-container` cannot enforce it
 at all: that layout partitions on `[docModel, id]`, giving every row its own logical partition.
 
+**Rate limiting.** Better Auth declares `rateLimit.key` unique and, when a create is rejected,
+re-reads and increments the existing row instead. Under `/id` nothing rejects the duplicate, so a
+concurrent first burst seeds one row per request and each gets its own budget -- measured as 12
+concurrent requests admitting 11 against a limit of 3, across 10 rows. Set
+`rateLimitPartition: "key"` to partition that container on `/keyHash` with `key` as its unique
+key; the second concurrent seed is then rejected and Better Auth's own recovery path takes over.
+The limit check itself lives in the caller's `where` (`count < max`), and `incrementOne` guards
+the write with an `If-Match` ETag whenever a `set` is present, which is what serialises the
+check-then-act. Removing that guard would let every racing caller win at once.
+
 **`incrementOne` seeding.** Increments are applied with `incr` and no precondition, so concurrent
 increments compose. A field that does not exist yet cannot be incremented, so it is seeded with
 `set` from a read -- and that seeding write does not compose. Two concurrent first-increments both

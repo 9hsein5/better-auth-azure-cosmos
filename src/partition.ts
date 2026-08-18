@@ -53,6 +53,26 @@ export function deriveSessionTokenHash(document: AuthDocument): string | null {
  * partitioning on a hash of exactly those two fields puts every colliding row in one partition and
  * lets the database enforce the constraint the schema declares.
  */
+export const RATE_LIMIT_MODEL = "rateLimit";
+export const RATE_LIMIT_KEY_FIELD = "key";
+export const RATE_LIMIT_KEY_HASH_FIELD = "keyHash";
+
+export type RateLimitPartitionStrategy = "id" | "key";
+
+/** Lowercase hexadecimal, matching `hashSessionToken`. */
+export function hashRateLimitKey(key: string): string {
+	return createHash("sha256").update(key, "utf8").digest("hex");
+}
+
+export function rateLimitKeyHashOf(document: AuthDocument): string | null {
+	const stored = document[RATE_LIMIT_KEY_HASH_FIELD];
+	if (typeof stored === "string" && stored.length > 0) {
+		return stored;
+	}
+	const key = document[RATE_LIMIT_KEY_FIELD];
+	return typeof key === "string" ? hashRateLimitKey(key) : null;
+}
+
 export const ACCOUNT_MODEL = "account";
 export const ACCOUNT_ISSUER_FIELD = "issuer";
 export const ACCOUNT_ID_FIELD = "accountId";

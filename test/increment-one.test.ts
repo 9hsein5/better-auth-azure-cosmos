@@ -122,4 +122,31 @@ describe("incrementOne", () => {
 
 		expect(await readCount(id)).toBe(contenders);
 	}, 120_000);
+	/**
+	 * Better Auth expresses compare-and-set through the `where` -- the rate limiter bounds the
+	 * update with `count < max` -- and relies on the adapter to serialise the check-then-act it
+	 * read. Without the ETag every racing caller reads the same under-limit row and all of them
+	 * win, admitting more than `max`. Pinned because the rest of this suite passed while that
+	 * regression was in place.
+	 */
+	it("never exceeds a bound the caller expressed in the where", async () => {
+		const id = await seed({ attempts: 0 });
+		const bound = 3;
+
+		await Promise.all(
+			Array.from({ length: 8 }, async () =>
+				adapter.incrementOne({
+					model: "user",
+					where: [
+						{ field: "id", operator: "eq", value: id, connector: "AND" },
+						{ field: "attempts", operator: "lt", value: bound, connector: "AND" },
+					],
+					increment: { attempts: 1 },
+					set: { name: "limited" },
+				}),
+			),
+		);
+
+		expect(await readCount(id)).toBeLessThanOrEqual(bound);
+	}, 120_000);
 });

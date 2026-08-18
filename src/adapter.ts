@@ -550,6 +550,9 @@ export function cosmosAdapter(
 				// contention, so it is applied with no precondition. A guarded transition (`set`) must
 				// not apply if the row moved after the guard was evaluated, so it carries the ETag and
 				// reports a lost race the same way a guard miss is reported: null.
+				// A `set` means the caller is doing compare-and-set: Better Auth expresses the guard in
+				// the `where` (`count < max`, or a previous value), and the ETag is what serialises the
+				// check-then-act it read. Dropping it there would admit every racing caller at once.
 				const guarded = Object.keys(set ?? {}).length > 0;
 				try {
 					const response = await layout
