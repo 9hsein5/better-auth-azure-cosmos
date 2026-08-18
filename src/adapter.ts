@@ -1,4 +1,10 @@
-import type { Container, Database, PartitionKey, SqlParameter } from "@azure/cosmos";
+import type {
+	Container,
+	Database,
+	PartitionKey,
+	SqlParameter,
+	SqlQuerySpec,
+} from "@azure/cosmos";
 import { ErrorResponse } from "@azure/cosmos";
 import type { BetterAuthOptions } from "better-auth";
 import { createAdapterFactory } from "better-auth/adapters";
@@ -34,6 +40,8 @@ type QueryShape = {
 	readonly sortBy?: { readonly field: string; readonly direction: "asc" | "desc" };
 	readonly limit?: number;
 	readonly offset?: number;
+	/** Tallies in the engine instead of projecting rows, so only the count crosses the wire. */
+	readonly count?: boolean;
 	/** Already mapped to stored field names. */
 	readonly select?: readonly string[];
 };
@@ -115,8 +123,9 @@ function buildQuery(
 	}
 
 	let query = "SELECT";
-	query +=
-		shape.select && shape.select.length > 0
+	query += shape.count
+		? " VALUE COUNT(1)"
+		: shape.select && shape.select.length > 0
 			? ` ${shape.select.map((field) => quoteFieldPath(field)).join(", ")}`
 			: " *";
 	query += " FROM c";
@@ -154,7 +163,6 @@ async function queryDocuments(
 	shape: QueryShape,
 	mapField: FieldMapper,
 ): Promise<StoredAuthDocument[]> {
-	const container: Container = layout.container(model);
 	const spec = buildQuery(layout, model, shape, mapField);
 	const scopes = layout.scopesOf(model, shape.where);
 
@@ -162,23 +170,50 @@ async function queryDocuments(
 	// such a query is left unscoped rather than answered from an arbitrary slice of each partition.
 	const pageable =
 		shape.limit !== undefined || shape.offset !== undefined || shape.sortBy !== undefined;
+	const routed = scopes !== null && scopes.length > 1 && pageable ? null : scopes;
 
-	if (scopes === null || (scopes.length > 1 && pageable)) {
+	return fetchAll<StoredAuthDocument>(layout, model, spec, routed);
+}
+
+/**
+ * Counting in the engine keeps the matched rows on the server: only one tally per partition
+ * crosses the wire, so the cost stops scaling with how many documents match.
+ */
+async function countDocuments(
+	layout: CosmosLayout,
+	model: string,
+	where: readonly CleanedWhere[],
+	mapField: FieldMapper,
+): Promise<number> {
+	const spec = buildQuery(layout, model, { where, count: true }, mapField);
+	const tallies = await fetchAll<number>(layout, model, spec, layout.scopesOf(model, where));
+	return tallies.reduce((total, tally) => total + tally, 0);
+}
+
+/**
+ * Runs a spec once per partition the `where` pins, or once unscoped when it pins none.
+ *
+ * The per-partition form is not atomic and does not claim to be -- Cosmos cannot transact across
+ * logical partitions -- but every read is routed rather than broadcast.
+ */
+async function fetchAll<T>(
+	layout: CosmosLayout,
+	model: string,
+	spec: SqlQuerySpec,
+	scopes: readonly PartitionKey[] | null,
+): Promise<T[]> {
+	const container: Container = layout.container(model);
+
+	if (scopes === null) {
 		// Unscoped: the query must probe every physical partition's index, so the plan is fetched
 		// immediately rather than after the gateway path fails and retries.
-		const response = await container.items
-			.query<StoredAuthDocument>(spec, { forceQueryPlan: true })
-			.fetchAll();
+		const response = await container.items.query<T>(spec, { forceQueryPlan: true }).fetchAll();
 		return response.resources;
 	}
 
-	// One targeted operation per partition. Not atomic across partitions -- Cosmos cannot transact
-	// across logical partitions -- but every read is routed rather than broadcast.
 	const pages = await Promise.all(
 		scopes.map(async (partitionKey) => {
-			const response = await container.items
-				.query<StoredAuthDocument>(spec, { partitionKey })
-				.fetchAll();
+			const response = await container.items.query<T>(spec, { partitionKey }).fetchAll();
 			return response.resources;
 		}),
 	);
@@ -392,13 +427,7 @@ export function cosmosAdapter(
 			},
 
 			async count({ model, where }) {
-				const documents = await queryDocuments(
-					layout,
-					model,
-					{ where: where ?? [] },
-					mapperFor(model),
-				);
-				return documents.length;
+				return countDocuments(layout, model, where ?? [], mapperFor(model));
 			},
 
 			async update({ model, where, update }) {
