@@ -62,10 +62,13 @@ export type CosmosLayout = {
 	/** Fields written alongside the document to satisfy the partition key. */
 	readonly stamp: (model: string, data: AuthDocument) => AuthDocument;
 	/**
-	 * Partition key a `where` pins the query to, or null when the query cannot be scoped and must
-	 * be served across partitions.
+	 * Partition keys a `where` pins the query to, or null when the query cannot be scoped and must
+	 * be served across partitions. More than one key means the query is answered per partition.
 	 */
-	readonly scopeOf: (model: string, where: readonly CleanedWhere[]) => PartitionKey | null;
+	readonly scopesOf: (
+		model: string,
+		where: readonly CleanedWhere[],
+	) => readonly PartitionKey[] | null;
 	/** Whether an `id` on its own identifies the partition, making a lookup a point read. */
 	readonly addressableById: (model: string) => boolean;
 	/** Containers this layout needs, and the partition key each must be created with. */
@@ -78,26 +81,41 @@ export type CosmosLayout = {
 };
 
 /**
- * Only an AND-connected, case-sensitive equality on a string pins a partition. An OR-connected
- * clause can be satisfied by documents in other partitions, so scoping on it would silently drop
- * matches.
+ * Partition keys a `where` pins the query to, or null when it must be served across partitions.
+ *
+ * Only AND-connected, case-sensitive clauses count. An OR-connected clause can be satisfied by
+ * documents in other partitions, so scoping on it would silently drop matches.
+ *
+ * `token in [...]` is the shape Better Auth uses to revoke a known set of sessions. Every key is
+ * derivable, so the query is answered as one targeted operation per partition instead of a single
+ * unscoped one.
  */
-function sessionScopeOf(where: readonly CleanedWhere[]): PartitionKey | null {
+function sessionScopesOf(where: readonly CleanedWhere[]): readonly PartitionKey[] | null {
 	for (const clause of where) {
-		if (clause.connector === "OR") {
+		if (clause.connector === "OR" || clause.mode === "insensitive") {
 			continue;
 		}
-		if ((clause.operator ?? "eq") !== "eq" || clause.mode === "insensitive") {
+		const isToken = clause.field === SESSION_TOKEN_FIELD;
+		const isHash = clause.field === SESSION_TOKEN_HASH_FIELD;
+		if (!isToken && !isHash) {
 			continue;
 		}
-		if (typeof clause.value !== "string") {
-			continue;
+		const operator = clause.operator ?? "eq";
+
+		if (operator === "eq" && typeof clause.value === "string") {
+			return [isHash ? clause.value : hashSessionToken(clause.value)];
 		}
-		if (clause.field === SESSION_TOKEN_HASH_FIELD) {
-			return clause.value;
-		}
-		if (clause.field === SESSION_TOKEN_FIELD) {
-			return hashSessionToken(clause.value);
+
+		if (
+			operator === "in" &&
+			Array.isArray(clause.value) &&
+			clause.value.length > 0 &&
+			clause.value.every((entry) => typeof entry === "string")
+		) {
+			const keys = (clause.value as string[]).map((entry) =>
+				isHash ? entry : hashSessionToken(entry),
+			);
+			return [...new Set(keys)];
 		}
 	}
 	return null;
@@ -133,7 +151,7 @@ export function resolveLayout(
 				const hash = deriveSessionTokenHash(data);
 				return hash === null ? {} : { [SESSION_TOKEN_HASH_FIELD]: hash };
 			},
-			scopeOf: (model, where) => (isHashedSession(model) ? sessionScopeOf(where) : null),
+			scopesOf: (model, where) => (isHashedSession(model) ? sessionScopesOf(where) : null),
 			addressableById: (model) => !isHashedSession(model),
 			requiredContainers: (models) =>
 				models.map((model) => ({
@@ -156,7 +174,7 @@ export function resolveLayout(
 		container: () => container,
 		partitionKeyOf: (model, document) => [model, document.id as string],
 		stamp: (model) => ({ [modelField]: model }),
-		scopeOf: () => null,
+		scopesOf: () => null,
 		addressableById: () => true,
 		// One container holds every model, so the requested models do not change what is created.
 		requiredContainers: () => [

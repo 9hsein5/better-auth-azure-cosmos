@@ -67,3 +67,26 @@ export async function ensureAuthContainers(
 	}
 	return required.map((container) => container.id);
 }
+
+/**
+ * A partition key cannot be changed after a container is created, so an existing container with the
+ * wrong one is a configuration error that must surface loudly. `createIfNotExists` returns the
+ * existing definition unchanged, which would otherwise route every session write to the wrong key.
+ */
+function assertPartitionKey(
+	containerId: string,
+	expected: PartitionKeyDefinition,
+	actual: PartitionKeyDefinition | undefined,
+): void {
+	const actualPaths = actual?.paths ?? [];
+	const expectedPaths = expected.paths ?? [];
+	const same =
+		actualPaths.length === expectedPaths.length &&
+		actualPaths.every((path, index) => path === expectedPaths[index]);
+
+	if (!same) {
+		throw new Error(
+			`Container "${containerId}" already exists with partition key [${actualPaths.join(", ")}], but this layout requires [${expectedPaths.join(", ")}]. A partition key cannot be changed after creation: migrate to a new container instead.`,
+		);
+	}
+}

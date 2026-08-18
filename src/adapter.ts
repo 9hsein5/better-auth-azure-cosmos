@@ -156,16 +156,33 @@ async function queryDocuments(
 ): Promise<StoredAuthDocument[]> {
 	const container: Container = layout.container(model);
 	const spec = buildQuery(layout, model, shape, mapField);
-	const partitionKey = layout.scopeOf(model, shape.where);
-	// A scoped query is routed to a single physical partition and needs no cross-partition plan.
-	// Unscoped, the query must probe every physical partition's index, so the plan is fetched
-	// immediately rather than after the gateway path fails and retries. The two are never combined.
-	const options =
-		partitionKey === null ? { forceQueryPlan: true } : { partitionKey };
-	const response = await container.items
-		.query<StoredAuthDocument>(spec, options)
-		.fetchAll();
-	return response.resources;
+	const scopes = layout.scopesOf(model, shape.where);
+
+	// Paging has no defined order across partitions, so a multi-partition fan-out cannot honour it;
+	// such a query is left unscoped rather than answered from an arbitrary slice of each partition.
+	const pageable =
+		shape.limit !== undefined || shape.offset !== undefined || shape.sortBy !== undefined;
+
+	if (scopes === null || (scopes.length > 1 && pageable)) {
+		// Unscoped: the query must probe every physical partition's index, so the plan is fetched
+		// immediately rather than after the gateway path fails and retries.
+		const response = await container.items
+			.query<StoredAuthDocument>(spec, { forceQueryPlan: true })
+			.fetchAll();
+		return response.resources;
+	}
+
+	// One targeted operation per partition. Not atomic across partitions -- Cosmos cannot transact
+	// across logical partitions -- but every read is routed rather than broadcast.
+	const pages = await Promise.all(
+		scopes.map(async (partitionKey) => {
+			const response = await container.items
+				.query<StoredAuthDocument>(spec, { partitionKey })
+				.fetchAll();
+			return response.resources;
+		}),
+	);
+	return pages.flat();
 }
 
 /**

@@ -281,6 +281,102 @@ describe("session /tokenHash partition strategy", () => {
 		expect(found?.id).toBe(created.id);
 	}, 120_000);
 
+	it("targets each partition for an explicit set of tokens rather than fanning out", async () => {
+		const userId = randomUUID();
+		const doomed = [await newSession(userId), await newSession(userId), await newSession(userId)];
+		const survivor = await newSession(userId);
+		const expected = doomed.map((session) => hashSessionToken(session.token)).sort();
+
+		// The shape Better Auth uses to revoke a known set of sessions.
+		const mark = queries.length;
+		const deleted = await adapter.deleteMany({
+			model: "session",
+			where: [
+				{
+					field: "token",
+					operator: "in",
+					value: doomed.map((session) => session.token),
+					connector: "AND",
+				},
+			],
+		});
+		expect(deleted).toBe(doomed.length);
+
+		const issued = since(mark).filter((record) => record.query.includes("token"));
+		expect(issued.every((record) => record.scoped)).toBe(true);
+		expect([...new Set(issued.map((record) => String(record.partitionKey)))].sort()).toStrictEqual(
+			expected,
+		);
+
+		for (const session of doomed) {
+			const gone = await adapter.findOne({
+				model: "session",
+				where: [{ field: "token", operator: "eq", value: session.token, connector: "AND" }],
+			});
+			expect(gone).toBeNull();
+		}
+		const kept = await adapter.findOne<{ id: string }>({
+			model: "session",
+			where: [{ field: "token", operator: "eq", value: survivor.token, connector: "AND" }],
+		});
+		expect(kept?.id).toBe(survivor.id);
+	}, 180_000);
+
+	it("preserves tokenHash across every write path and never returns it", async () => {
+		const created = await newSession(randomUUID());
+		const expected = hashSessionToken(created.token);
+
+		const storedHash = async (): Promise<string | undefined> => {
+			const { resources } = await client
+				.database(databaseId)
+				.container("session")
+				.items.query<{ tokenHash: string }>({
+					query: 'SELECT c["tokenHash"] FROM c WHERE c.id = @id',
+					parameters: [{ name: "@id", value: created.id }],
+				})
+				.fetchAll();
+			return resources[0]?.tokenHash;
+		};
+
+		expect(await storedHash()).toBe(expected);
+		expect(created).not.toHaveProperty("tokenHash");
+
+		// A rolling refresh, then an unrelated field update: neither may drop the derived field.
+		const refreshed = await adapter.update({
+			model: "session",
+			where: [{ field: "token", operator: "eq", value: created.token, connector: "AND" }],
+			update: { expiresAt: new Date(Date.now() + 7_200_000) },
+		});
+		expect(await storedHash()).toBe(expected);
+		expect(refreshed).not.toHaveProperty("tokenHash");
+
+		const relabelled = await adapter.update({
+			model: "session",
+			where: [{ field: "token", operator: "eq", value: created.token, connector: "AND" }],
+			update: { ipAddress: "203.0.113.9" },
+		});
+		expect(await storedHash()).toBe(expected);
+		expect(relabelled).not.toHaveProperty("tokenHash");
+
+		await adapter.updateMany({
+			model: "session",
+			where: [{ field: "id", operator: "eq", value: created.id, connector: "AND" }],
+			update: { userAgent: "harness" },
+		});
+		expect(await storedHash()).toBe(expected);
+
+		const read = await adapter.findOne({
+			model: "session",
+			where: [{ field: "token", operator: "eq", value: created.token, connector: "AND" }],
+		});
+		expect(read).not.toHaveProperty("tokenHash");
+		const listed = await adapter.findMany({
+			model: "session",
+			where: [{ field: "id", operator: "eq", value: created.id, connector: "AND" }],
+		});
+		expect(listed[0]).not.toHaveProperty("tokenHash");
+	}, 180_000);
+
 	it("never puts a raw token in a partition key", () => {
 		for (const record of sessionQueries()) {
 			if (typeof record.partitionKey === "string") {
