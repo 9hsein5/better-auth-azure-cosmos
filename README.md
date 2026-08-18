@@ -158,9 +158,13 @@ increments compose. A field that does not exist yet cannot be incremented, so it
 `set` from a read -- and that seeding write does not compose. Two concurrent first-increments both
 seed, yielding `value` rather than twice it.
 
-**Uniqueness.** Cosmos unique key policies are enforced *within a logical partition*, so they cannot
-enforce uniqueness across documents under either layout. Better Auth's own existence checks apply,
-but the database will not be the final arbiter of, for example, a duplicate email under a race.
+**Uniqueness.** Cosmos unique key policies are enforced *within a logical partition*, so a declared
+constraint is enforced only where the partition key is derived from exactly the constrained fields.
+`accountPartition: "accountKey"` does that for `(issuer, accountId)`; no other layout enforces any
+declared constraint. Everything else -- `user.email`, `session.token` -- relies on Better Auth's own
+existence checks, and the database will not be the final arbiter of, for example, a duplicate email
+under a race. At construction the adapter warns, naming exactly the constraints the *active* layout
+leaves unenforced.
 
 **Query cost.** Only a lookup by `id` is a point read. Every other `where` becomes a query. Under
 the `single-container` layout those queries are scoped by the model prefix of the partition key,

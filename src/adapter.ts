@@ -303,24 +303,26 @@ type DeclaredSchema = Record<
 
 /**
  * A Cosmos unique key is scoped to a logical partition, so a constraint Better Auth declares
- * globally is not enforced by the database here -- Better Auth 1.7 declares `["issuer","accountId"]`
- * unique on `account`, and `user.email` has always been declared unique.
+ * globally holds only where the partition key is derived from exactly the constrained fields.
+ * `accountPartition: "accountKey"` does that for `(issuer, accountId)`; nothing else does, so
+ * `user.email` and the rest fall back to Better Auth's own existence checks.
  *
- * This warns rather than staying quiet because silence reads as protection: anyone reading the
- * schema would reasonably assume the database is the arbiter. Only model and field names are
- * printed, never values.
+ * Silence would read as protection, but so would a false alarm read as noise: naming a
+ * constraint the database does enforce teaches operators to ignore the warning and to add
+ * redundant application-level enforcement. Only what the active layout leaves unenforced is
+ * named, and only model and field names are printed, never values.
  */
-function warnUnenforceableUniqueness(schema: DeclaredSchema): void {
+function warnUnenforceableUniqueness(schema: DeclaredSchema, layout: CosmosLayout): void {
 	const unenforceable: string[] = [];
 
 	for (const [model, table] of Object.entries(schema)) {
 		for (const [field, definition] of Object.entries(table.fields)) {
-			if (definition.unique === true) {
+			if (definition.unique === true && !layout.enforcesUnique(model, [field])) {
 				unenforceable.push(`${model}.${field}`);
 			}
 		}
 		for (const index of table.indexes ?? []) {
-			if (index.unique === true) {
+			if (index.unique === true && !layout.enforcesUnique(model, index.fields)) {
 				unenforceable.push(`${model}(${index.fields.join(", ")})`);
 			}
 		}
@@ -376,7 +378,7 @@ export function cosmosAdapter(
 			transaction: false,
 		},
 		adapter: ({ getFieldName, getDefaultModelName, schema }) => {
-			warnUnenforceableUniqueness(schema);
+			warnUnenforceableUniqueness(schema, layout);
 			assertAccountKeySupported(config.layout, schema);
 
 			const mapperFor =

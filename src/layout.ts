@@ -94,6 +94,12 @@ export type CosmosLayout = {
 	) => readonly PartitionKey[] | null;
 	/** Whether an `id` on its own identifies the partition, making a lookup a point read. */
 	readonly addressableById: (model: string) => boolean;
+	/**
+	 * Whether the database enforces a declared unique constraint under this layout. True only
+	 * when the partition key is derived from exactly the constrained fields and the container
+	 * carries a matching unique key policy.
+	 */
+	readonly enforcesUnique: (model: string, fields: readonly string[]) => boolean;
 	/** Containers this layout needs, and the partition key each must be created with. */
 	readonly requiredContainers: (
 		models: readonly string[],
@@ -174,6 +180,9 @@ function accountScopesOf(where: readonly CleanedWhere[]): readonly PartitionKey[
 	return issuer !== null && accountId !== null ? [hashAccountKey(issuer, accountId)] : null;
 }
 
+/** The fields whose hash forms the account partition key, and thus the only enforceable pair. */
+const ACCOUNT_KEY_FIELDS: readonly string[] = [ACCOUNT_ISSUER_FIELD, ACCOUNT_ID_FIELD];
+
 export function resolveLayout(
 	database: Database,
 	options: CosmosLayoutOptions = { kind: "single-container" },
@@ -226,6 +235,10 @@ export function resolveLayout(
 				return isHashedAccount(model) ? accountScopesOf(where) : null;
 			},
 			addressableById: (model) => !isHashedSession(model) && !isHashedAccount(model),
+			enforcesUnique: (model, fields) =>
+				isHashedAccount(model) &&
+				fields.length === ACCOUNT_KEY_FIELDS.length &&
+				ACCOUNT_KEY_FIELDS.every((field) => fields.includes(field)),
 			requiredContainers: (models) =>
 				models.map((model) => ({
 					id: nameFor(model),
@@ -269,6 +282,9 @@ export function resolveLayout(
 		stamp: (model) => ({ [modelField]: model }),
 		scopesOf: () => null,
 		addressableById: () => true,
+		// A hierarchical `[docModel, id]` key gives every row its own partition, so a
+		// partition-scoped unique key could never constrain two different ids.
+		enforcesUnique: () => false,
 		// One container holds every model, so the requested models do not change what is created.
 		requiredContainers: () => [
 			{
