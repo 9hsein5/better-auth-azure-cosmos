@@ -20,11 +20,16 @@ async function ensureContainer(
 	database: Database,
 	id: string,
 	partitionKey: PartitionKeyDefinition,
+	uniqueKeyPolicy?: { uniqueKeys: { paths: string[] }[] },
 ): Promise<void> {
 	let existing: PartitionKeyDefinition | undefined;
+	let existingUniqueKeys: string[] | undefined;
 	try {
-		const { resource } = await database.containers.createIfNotExists({ id, partitionKey });
+		const { resource } = await database.containers.createIfNotExists(
+			uniqueKeyPolicy === undefined ? { id, partitionKey } : { id, partitionKey, uniqueKeyPolicy },
+		);
 		existing = resource?.partitionKey;
+		existingUniqueKeys = resource?.uniqueKeyPolicy?.uniqueKeys?.map((k) => (k.paths ?? []).join(","));
 	} catch (error) {
 		if (error instanceof ErrorResponse && error.code === CONFLICT) {
 			return;
@@ -39,6 +44,25 @@ async function ensureContainer(
 	}
 	throw new Error(
 		`Container "${id}" is partitioned on ${actual.join(", ")}, but this layout needs ${expected.join(", ")}. A partition key cannot be changed after a container is created, so use a new container instead.`,
+	);
+}
+
+/** A unique key policy is as immutable as the partition key, so a mismatch is equally fatal. */
+function assertUniqueKeys(
+	id: string,
+	expected: { uniqueKeys: { paths: string[] }[] } | undefined,
+	actual: string[] | undefined,
+): void {
+	if (expected === undefined) {
+		return;
+	}
+	const want = expected.uniqueKeys.map((key) => key.paths.join(",")).sort();
+	const have = [...(actual ?? [])].sort();
+	if (want.length === have.length && want.every((key, index) => key === have[index])) {
+		return;
+	}
+	throw new Error(
+		`Container "${id}" has unique key policy [${have.join(" | ")}], but this layout needs [${want.join(" | ")}]. A unique key policy cannot be changed after a container is created, so use a new container instead.`,
 	);
 }
 
@@ -63,7 +87,7 @@ export async function ensureAuthContainers(
 
 	const required = resolveLayout(database, layout).requiredContainers(models);
 	for (const container of required) {
-		await ensureContainer(database, container.id, container.partitionKey);
+		await ensureContainer(database, container.id, container.partitionKey, container.uniqueKeyPolicy);
 	}
 	return required.map((container) => container.id);
 }

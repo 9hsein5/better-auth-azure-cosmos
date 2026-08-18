@@ -135,6 +135,29 @@ document here lives in its own. The adapter therefore reports `transaction: fals
 runs those operations sequentially. `consumeOne` is implemented natively so that single-use
 credentials such as magic links and OTPs stay race-safe without a transaction.
 
+**Account identity (`accountPartition`).** **Requires better-auth >= 1.7** — it keys on the
+`issuer` field, which earlier versions do not have, and the adapter refuses to construct without it.
+Better Auth 1.7 resolves an account with
+`findAccountOwnerByKey({ issuer, accountId })` and declares that pair unique. Set
+`accountPartition: "accountKey"` on the `container-per-model` layout to make that constraint real:
+the `account` container is partitioned on `/accountKeyHash` (a stored `sha256(issuer NUL accountId)`)
+and created with a unique key policy on `["/issuer", "/accountId"]`. Because the partition key is
+derived from exactly those paths, every colliding row lands in one logical partition -- the only
+scope a Cosmos unique key has -- so the database rejects a duplicate with a 409.
+
+The trade is the same one `sessionPartition` makes: resolving an account by issuer becomes
+partition-scoped, while listing or deleting a user's accounts by `userId` becomes cross-partition.
+It defaults to `"id"`, so existing deployments are unchanged.
+
+Both a partition key and a unique key policy are **immutable after a container is created**, so this
+is a decision to make before `ensureAuthContainers` first runs. `single-container` cannot enforce it
+at all: that layout partitions on `[docModel, id]`, giving every row its own logical partition.
+
+**`incrementOne` seeding.** Increments are applied with `incr` and no precondition, so concurrent
+increments compose. A field that does not exist yet cannot be incremented, so it is seeded with
+`set` from a read -- and that seeding write does not compose. Two concurrent first-increments both
+seed, yielding `value` rather than twice it.
+
 **Uniqueness.** Cosmos unique key policies are enforced *within a logical partition*, so they cannot
 enforce uniqueness across documents under either layout. Better Auth's own existence checks apply,
 but the database will not be the final arbiter of, for example, a duplicate email under a race.

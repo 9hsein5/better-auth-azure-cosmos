@@ -11,7 +11,10 @@ export {
 } from "./layout";
 export type { AuthDocument, AuthFieldValue, StoredAuthDocument } from "./document";
 export {
+	ACCOUNT_KEY_HASH_FIELD,
 	SESSION_TOKEN_HASH_FIELD,
+	hashAccountKey,
 	hashSessionToken,
+	type AccountPartitionStrategy,
 	type SessionPartitionStrategy,
 } from "./partition";

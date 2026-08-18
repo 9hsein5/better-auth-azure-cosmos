@@ -3,12 +3,19 @@ import { PartitionKeyKind } from "@azure/cosmos";
 import type { CleanedWhere } from "better-auth/adapters";
 import type { AuthDocument } from "./document";
 import {
+	ACCOUNT_ID_FIELD,
+	ACCOUNT_ISSUER_FIELD,
+	ACCOUNT_KEY_HASH_FIELD,
+	ACCOUNT_MODEL,
 	SESSION_MODEL,
 	SESSION_TOKEN_FIELD,
 	SESSION_TOKEN_HASH_FIELD,
+	accountKeyHashOf,
 	deriveSessionTokenHash,
+	hashAccountKey,
 	hashSessionToken,
 	sessionTokenHashOf,
+	type AccountPartitionStrategy,
 	type SessionPartitionStrategy,
 } from "./partition";
 
@@ -53,6 +60,22 @@ export type CosmosLayoutOptions =
 			 * cross-partition.
 			 */
 			readonly sessionPartition?: SessionPartitionStrategy;
+			/**
+			 * Partition strategy for the `account` container. **Requires better-auth >= 1.7**,
+			 * which is where the `issuer` field exists. `id` (the default) keeps it on
+			 * `/id`. `accountKey` partitions on `/accountKeyHash`, a stored
+			 * `sha256(issuer NUL accountId)`, and creates the container with a unique key
+			 * policy on `["/issuer", "/accountId"]`.
+			 *
+			 * A Cosmos unique key is only enforced within a logical partition, so this is what
+			 * makes the `["issuer", "accountId"]` uniqueness Better Auth declares actually
+			 * enforceable. Resolving an account by issuer becomes partition-scoped; listing a
+			 * user's accounts becomes cross-partition.
+			 *
+			 * Both the partition key and the unique key policy are immutable after a container
+			 * is created, so this must be chosen up front.
+			 */
+			readonly accountPartition?: AccountPartitionStrategy;
 	  };
 
 export type CosmosLayout = {
@@ -74,7 +97,11 @@ export type CosmosLayout = {
 	/** Containers this layout needs, and the partition key each must be created with. */
 	readonly requiredContainers: (
 		models: readonly string[],
-	) => readonly { id: string; partitionKey: PartitionKeyDefinition }[];
+	) => readonly {
+		id: string;
+		partitionKey: PartitionKeyDefinition;
+		uniqueKeyPolicy?: { uniqueKeys: { paths: string[] }[] };
+	}[];
 	/** Restricts a query to one model, or null when the container is the model. */
 	readonly modelField: string | null;
 	readonly reservedFields: readonly string[];
@@ -121,6 +148,32 @@ function sessionScopesOf(where: readonly CleanedWhere[]): readonly PartitionKey[
 	return null;
 }
 
+function accountScopesOf(where: readonly CleanedWhere[]): readonly PartitionKey[] | null {
+	let issuer: string | null = null;
+	let accountId: string | null = null;
+
+	for (const clause of where) {
+		if (clause.connector === "OR" || clause.mode === "insensitive") {
+			continue;
+		}
+		if ((clause.operator ?? "eq") !== "eq" || typeof clause.value !== "string") {
+			continue;
+		}
+		if (clause.field === ACCOUNT_KEY_HASH_FIELD) {
+			return [clause.value];
+		}
+		if (clause.field === ACCOUNT_ISSUER_FIELD) {
+			issuer = clause.value;
+		}
+		if (clause.field === ACCOUNT_ID_FIELD) {
+			accountId = clause.value;
+		}
+	}
+
+	// Only the complete pair identifies a partition; `accountId` alone is not unique across issuers.
+	return issuer !== null && accountId !== null ? [hashAccountKey(issuer, accountId)] : null;
+}
+
 export function resolveLayout(
 	database: Database,
 	options: CosmosLayoutOptions = { kind: "single-container" },
@@ -128,11 +181,22 @@ export function resolveLayout(
 	if (options.kind === "container-per-model") {
 		const nameFor = options.containerName ?? ((model: string) => model);
 		const hashesSessions = options.sessionPartition === "tokenHash";
+		const hashesAccounts = options.accountPartition === "accountKey";
+		const isHashedAccount = (model: string): boolean => hashesAccounts && model === ACCOUNT_MODEL;
 		const isHashedSession = (model: string): boolean => hashesSessions && model === SESSION_MODEL;
 
 		return {
 			container: (model) => database.container(nameFor(model)),
 			partitionKeyOf: (model, document) => {
+				if (isHashedAccount(model)) {
+					const hash = accountKeyHashOf(document);
+					if (hash === null) {
+						throw new Error(
+							"The account container is partitioned by /accountKeyHash, but the document carries neither an accountKeyHash nor an issuer and accountId.",
+						);
+					}
+					return hash;
+				}
 				if (!isHashedSession(model)) {
 					return document.id as PartitionKey;
 				}
@@ -145,24 +209,53 @@ export function resolveLayout(
 				return hash;
 			},
 			stamp: (model, data) => {
+				if (isHashedAccount(model)) {
+					const hash = accountKeyHashOf(data);
+					return hash === null ? {} : { [ACCOUNT_KEY_HASH_FIELD]: hash };
+				}
 				if (!isHashedSession(model)) {
 					return {};
 				}
 				const hash = deriveSessionTokenHash(data);
 				return hash === null ? {} : { [SESSION_TOKEN_HASH_FIELD]: hash };
 			},
-			scopesOf: (model, where) => (isHashedSession(model) ? sessionScopesOf(where) : null),
-			addressableById: (model) => !isHashedSession(model),
+			scopesOf: (model, where) => {
+				if (isHashedSession(model)) {
+					return sessionScopesOf(where);
+				}
+				return isHashedAccount(model) ? accountScopesOf(where) : null;
+			},
+			addressableById: (model) => !isHashedSession(model) && !isHashedAccount(model),
 			requiredContainers: (models) =>
 				models.map((model) => ({
 					id: nameFor(model),
+					// The unique key is only enforceable because the partition key is derived from
+					// exactly these paths, so every colliding row shares one logical partition.
+					...(isHashedAccount(model)
+						? {
+								uniqueKeyPolicy: {
+									uniqueKeys: [
+										{ paths: [`/${ACCOUNT_ISSUER_FIELD}`, `/${ACCOUNT_ID_FIELD}`] },
+									],
+								},
+							}
+						: {}),
 					partitionKey: {
-						paths: [isHashedSession(model) ? `/${SESSION_TOKEN_HASH_FIELD}` : "/id"],
+						paths: [
+						isHashedSession(model)
+							? `/${SESSION_TOKEN_HASH_FIELD}`
+							: isHashedAccount(model)
+								? `/${ACCOUNT_KEY_HASH_FIELD}`
+								: "/id",
+					],
 					},
 				})),
 			modelField: null,
 			// Storage-only, so Better Auth never sees it on a session it reads back.
-			reservedFields: hashesSessions ? [SESSION_TOKEN_HASH_FIELD] : [],
+			reservedFields: [
+				...(hashesSessions ? [SESSION_TOKEN_HASH_FIELD] : []),
+				...(hashesAccounts ? [ACCOUNT_KEY_HASH_FIELD] : []),
+			],
 		};
 	}
 

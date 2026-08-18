@@ -50,7 +50,11 @@ const MODELS = [
 	"user_custom",
 	"user_table",
 ];
-const layout = { kind: "container-per-model", sessionPartition: "tokenHash" } as const;
+const layout = {
+	kind: "container-per-model",
+	sessionPartition: "tokenHash",
+	accountPartition: "accountKey",
+} as const;
 
 const client = new CosmosClient({ endpoint, key });
 

@@ -46,3 +46,33 @@ export function deriveSessionTokenHash(document: AuthDocument): string | null {
   const stored = document[SESSION_TOKEN_HASH_FIELD];
   return typeof stored === "string" && stored.length > 0 ? stored : null;
 }
+
+/**
+ * Better Auth 1.7 resolves an account with `findAccountOwnerByKey({ issuer, accountId })` and
+ * declares that pair unique. A Cosmos unique key is only enforced within a logical partition, so
+ * partitioning on a hash of exactly those two fields puts every colliding row in one partition and
+ * lets the database enforce the constraint the schema declares.
+ */
+export const ACCOUNT_MODEL = "account";
+export const ACCOUNT_ISSUER_FIELD = "issuer";
+export const ACCOUNT_ID_FIELD = "accountId";
+export const ACCOUNT_KEY_HASH_FIELD = "accountKeyHash";
+
+export type AccountPartitionStrategy = "id" | "accountKey";
+
+/** Lowercase hexadecimal, matching `hashSessionToken`. Both halves stay verbatim. */
+export function hashAccountKey(issuer: string, accountId: string): string {
+	return createHash("sha256").update(`${issuer}\u0000${accountId}`, "utf8").digest("hex");
+}
+
+export function accountKeyHashOf(document: AuthDocument): string | null {
+	const stored = document[ACCOUNT_KEY_HASH_FIELD];
+	if (typeof stored === "string" && stored.length > 0) {
+		return stored;
+	}
+	const issuer = document[ACCOUNT_ISSUER_FIELD];
+	const accountId = document[ACCOUNT_ID_FIELD];
+	return typeof issuer === "string" && typeof accountId === "string"
+		? hashAccountKey(issuer, accountId)
+		: null;
+}

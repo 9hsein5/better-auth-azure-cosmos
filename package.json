@@ -1,70 +1,70 @@
 {
-  "name": "better-auth-azure-cosmos",
-  "version": "0.3.0",
-  "description": "Azure Cosmos DB for NoSQL adapter for Better Auth.",
-  "license": "MIT",
-  "author": "9hsein5",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/9hsein5/better-auth-azure-cosmos.git"
-  },
-  "homepage": "https://github.com/9hsein5/better-auth-azure-cosmos#readme",
-  "bugs": {
-    "url": "https://github.com/9hsein5/better-auth-azure-cosmos/issues"
-  },
-  "keywords": [
-    "better-auth",
-    "better-auth-adapter",
-    "azure",
-    "cosmos",
-    "cosmosdb",
-    "nosql",
-    "auth",
-    "authentication"
-  ],
-  "type": "module",
-  "sideEffects": false,
-  "files": [
-    "dist"
-  ],
-  "main": "./dist/index.js",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
-    }
-  },
-  "scripts": {
-    "build": "tsdown",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "emulator:up": "docker compose -f test/docker-compose.yml up -d --wait",
-    "emulator:down": "docker compose -f test/docker-compose.yml down -v",
-    "verify": "npm run typecheck && npm run build && npm run test",
-    "prepublishOnly": "npm run build"
-  },
-  "peerDependencies": {
-    "@azure/cosmos": "^4.0.0",
-    "better-auth": ">=1.6.0"
-  },
-  "devDependencies": {
-    "@azure/cosmos": "^4.5.0",
-    "@better-auth/test-utils": "1.6.26",
-    "@types/node": "^22.10.0",
-    "better-auth": "1.6.26",
-    "tsdown": "^0.15.0",
-    "typescript": "^5.7.0",
-    "vitest": "^4.1.10"
-  },
-  "engines": {
-    "node": ">=20"
-  },
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
-  }
+	"name": "better-auth-azure-cosmos",
+	"version": "0.4.0",
+	"description": "Azure Cosmos DB for NoSQL adapter for Better Auth.",
+	"license": "MIT",
+	"author": "9hsein5",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/9hsein5/better-auth-azure-cosmos.git"
+	},
+	"homepage": "https://github.com/9hsein5/better-auth-azure-cosmos#readme",
+	"bugs": {
+		"url": "https://github.com/9hsein5/better-auth-azure-cosmos/issues"
+	},
+	"keywords": [
+		"better-auth",
+		"better-auth-adapter",
+		"azure",
+		"cosmos",
+		"cosmosdb",
+		"nosql",
+		"auth",
+		"authentication"
+	],
+	"type": "module",
+	"sideEffects": false,
+	"files": [
+		"dist"
+	],
+	"main": "./dist/index.js",
+	"module": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"require": "./dist/index.cjs"
+		}
+	},
+	"scripts": {
+		"build": "tsdown",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"emulator:up": "docker compose -f test/docker-compose.yml up -d --wait",
+		"emulator:down": "docker compose -f test/docker-compose.yml down -v",
+		"verify": "npm run typecheck && npm run build && npm run test",
+		"prepublishOnly": "npm run build"
+	},
+	"peerDependencies": {
+		"@azure/cosmos": "^4.0.0",
+		"better-auth": ">=1.6.0"
+	},
+	"devDependencies": {
+		"@azure/cosmos": "^4.5.0",
+		"@better-auth/test-utils": "1.7.0",
+		"@types/node": "^22.10.0",
+		"better-auth": "1.7.0",
+		"tsdown": "^0.15.0",
+		"typescript": "^5.7.0",
+		"vitest": "^4.1.10"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"publishConfig": {
+		"access": "public",
+		"registry": "https://registry.npmjs.org/"
+	}
 }

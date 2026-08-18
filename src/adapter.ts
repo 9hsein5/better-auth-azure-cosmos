@@ -2,6 +2,7 @@ import type {
 	Container,
 	Database,
 	PartitionKey,
+	PatchOperation,
 	SqlParameter,
 	SqlQuerySpec,
 } from "@azure/cosmos";
@@ -17,6 +18,7 @@ import type {
 import {
 	toAuthDocument,
 	type AuthDocument,
+	type AuthFieldValue,
 	type StoredAuthDocument,
 } from "./document";
 import { resolveLayout, type CosmosLayout, type CosmosLayoutOptions } from "./layout";
@@ -179,6 +181,12 @@ async function queryDocuments(
  * Counting in the engine keeps the matched rows on the server: only one tally per partition
  * crosses the wire, so the cost stops scaling with how many documents match.
  */
+/** Patch paths are interpolated, so the field name is validated the same way SQL paths are. */
+function patchPath(field: string): string {
+	quoteFieldPath(field);
+	return `/${field}`;
+}
+
 async function countDocuments(
 	layout: CosmosLayout,
 	model: string,
@@ -281,6 +289,71 @@ function asResult<T>(document: AuthDocument): T {
 	return document as T;
 }
 
+/**
+ * Shape of the declared schema this adapter needs, written structurally so it satisfies both the
+ * 1.6 and 1.7 type definitions -- `indexes` is optional, and 1.6 simply never declares any.
+ */
+type DeclaredSchema = Record<
+	string,
+	{
+		readonly fields: Record<string, { readonly unique?: boolean | undefined }>;
+		readonly indexes?: readonly { readonly fields: readonly string[]; readonly unique?: boolean | undefined }[] | undefined;
+	}
+>;
+
+/**
+ * A Cosmos unique key is scoped to a logical partition, so a constraint Better Auth declares
+ * globally is not enforced by the database here -- Better Auth 1.7 declares `["issuer","accountId"]`
+ * unique on `account`, and `user.email` has always been declared unique.
+ *
+ * This warns rather than staying quiet because silence reads as protection: anyone reading the
+ * schema would reasonably assume the database is the arbiter. Only model and field names are
+ * printed, never values.
+ */
+function warnUnenforceableUniqueness(schema: DeclaredSchema): void {
+	const unenforceable: string[] = [];
+
+	for (const [model, table] of Object.entries(schema)) {
+		for (const [field, definition] of Object.entries(table.fields)) {
+			if (definition.unique === true) {
+				unenforceable.push(`${model}.${field}`);
+			}
+		}
+		for (const index of table.indexes ?? []) {
+			if (index.unique === true) {
+				unenforceable.push(`${model}(${index.fields.join(", ")})`);
+			}
+		}
+	}
+
+	if (unenforceable.length === 0) {
+		return;
+	}
+
+	console.warn(
+		`[better-auth-azure-cosmos] Cosmos unique keys are scoped to a logical partition, so these declared unique constraints are NOT enforced by the database: ${unenforceable.join("; ")}. ` +
+			"Enforce them in the application, or create the container partitioned by a hash of exactly those fields with a matching uniqueKeyPolicy. " +
+			"A partition key and a unique key policy are both immutable after a container is created.",
+	);
+}
+
+/**
+ * `accountKey` partitions on a hash of `issuer` + `accountId`, and `issuer` only exists from Better
+ * Auth 1.7. Without it every account write would fail deep inside `partitionKeyOf`, so the cause is
+ * reported once, at construction.
+ */
+function assertAccountKeySupported(layout: CosmosLayoutOptions | undefined, schema: DeclaredSchema): void {
+	if (layout?.kind !== "container-per-model" || layout.accountPartition !== "accountKey") {
+		return;
+	}
+	if (schema["account"]?.fields["issuer"] !== undefined) {
+		return;
+	}
+	throw new Error(
+		'The layout sets accountPartition: "accountKey", but this Better Auth version has no `issuer` field on the account model. That strategy requires better-auth >= 1.7.',
+	);
+}
+
 export function cosmosAdapter(
 	database: Database,
 	config: CosmosAdapterConfig = {},
@@ -303,6 +376,9 @@ export function cosmosAdapter(
 			transaction: false,
 		},
 		adapter: ({ getFieldName, getDefaultModelName, schema }) => {
+			warnUnenforceableUniqueness(schema);
+			assertAccountKeySupported(config.layout, schema);
+
 			const mapperFor =
 				(model: string): FieldMapper =>
 				(field) =>
@@ -429,6 +505,72 @@ export function cosmosAdapter(
 			async count({ model, where }) {
 				return countDocuments(layout, model, where ?? [], mapperFor(model));
 			},
+
+			/**
+			 * Optional in Better Auth 1.6 and required from 1.7, so it is implemented here to keep a
+			 * single build working against both.
+			 *
+			 * Deliberately issued without an ETag precondition: `incr` is applied server-side, so
+			 * concurrent increments compose instead of one losing to a 412. That is the point of a
+			 * counter. A field that does not exist yet cannot be incremented, so it is seeded with
+			 * `set` -- treating absent as zero. That seeding write does NOT compose: two concurrent
+			 * first-increments both `set`, so the result is `value`, not `2 x value`. Composition
+			 * holds once the field exists as a number.
+			 */
+			async incrementOne({ model, where, increment, set }) {
+				const mapField = mapperFor(model);
+				const stored = await readOne(layout, model, where, mapField);
+				if (stored === null) {
+					return null;
+				}
+
+				const operations: PatchOperation[] = [];
+				for (const [field, value] of Object.entries(increment)) {
+					const path = patchPath(mapField(field));
+					operations.push(
+						typeof stored[path.slice(1)] === "number"
+							? { op: "incr", path, value }
+							: { op: "set", path, value },
+					);
+				}
+				for (const [field, value] of Object.entries(set ?? {})) {
+					operations.push({
+						op: "set",
+						path: patchPath(mapField(field)),
+						value: value as AuthFieldValue,
+					});
+				}
+				if (operations.length === 0) {
+					return asResult(toAuthDocument(stored, layout.reservedFields));
+				}
+
+				// Two different intents share this method. A pure counter must compose under
+				// contention, so it is applied with no precondition. A guarded transition (`set`) must
+				// not apply if the row moved after the guard was evaluated, so it carries the ETag and
+				// reports a lost race the same way a guard miss is reported: null.
+				const guarded = Object.keys(set ?? {}).length > 0;
+				try {
+					const response = await layout
+						.container(model)
+						.item(stored.id, layout.partitionKeyOf(model, stored))
+						.patch<StoredAuthDocument>(
+							{ operations },
+							guarded
+								? { accessCondition: { type: "IfMatch", condition: stored._etag } }
+								: undefined,
+						);
+					if (!response.resource) {
+						return null;
+					}
+					return asResult(toAuthDocument(response.resource, layout.reservedFields));
+				} catch (error) {
+					if (isStatus(error, PRECONDITION_FAILED)) {
+						return null;
+					}
+					throw error;
+				}
+			},
+
 
 			async update({ model, where, update }) {
 				const stored = await readOne(layout, model, where, mapperFor(model));
