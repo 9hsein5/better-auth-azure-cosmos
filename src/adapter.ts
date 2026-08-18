@@ -1,4 +1,4 @@
-import type { Container, Database, SqlParameter } from "@azure/cosmos";
+import type { Container, Database, PartitionKey, SqlParameter } from "@azure/cosmos";
 import { ErrorResponse } from "@azure/cosmos";
 import type { BetterAuthOptions } from "better-auth";
 import { createAdapterFactory } from "better-auth/adapters";
@@ -64,6 +64,38 @@ function isStatus(error: unknown, status: number): boolean {
 	return error instanceof ErrorResponse && error.code === status;
 }
 
+function samePartition(a: PartitionKey, b: PartitionKey): boolean {
+	if (Array.isArray(a) || Array.isArray(b)) {
+		return (
+			Array.isArray(a) &&
+			Array.isArray(b) &&
+			a.length === b.length &&
+			a.every((value, index) => value === b[index])
+		);
+	}
+	return a === b;
+}
+
+/**
+ * Cosmos cannot move a document between partitions, so an update that would re-key one is refused
+ * rather than written back under its old key, where the new key would never find it again.
+ */
+function assertPartitionUnchanged(
+	layout: CosmosLayout,
+	model: string,
+	stored: StoredAuthDocument,
+	next: AuthDocument,
+): void {
+	const from = layout.partitionKeyOf(model, stored);
+	const to = layout.partitionKeyOf(model, next);
+	if (samePartition(from, to)) {
+		return;
+	}
+	throw new Error(
+		`Updating this ${model} would move it to another partition, which Cosmos cannot do in place. Delete the document and create it again instead.`,
+	);
+}
+
 function buildQuery(
 	layout: CosmosLayout,
 	model: string,
@@ -124,13 +156,14 @@ async function queryDocuments(
 ): Promise<StoredAuthDocument[]> {
 	const container: Container = layout.container(model);
 	const spec = buildQuery(layout, model, shape, mapField);
-	// Neither layout binds a complete partition key here: single-container
-	// queries bind only the model prefix, while per-model queries leave /id
-	// unbound. Fetch the cross-partition query plan immediately instead of first
-	// attempting the gateway path, which fails and retries with a query plan.
-	// This helper never combines forceQueryPlan with the partitionKey option.
+	const partitionKey = layout.scopeOf(model, shape.where);
+	// A scoped query is routed to a single physical partition and needs no cross-partition plan.
+	// Unscoped, the query must probe every physical partition's index, so the plan is fetched
+	// immediately rather than after the gateway path fails and retries. The two are never combined.
+	const options =
+		partitionKey === null ? { forceQueryPlan: true } : { partitionKey };
 	const response = await container.items
-		.query<StoredAuthDocument>(spec, { forceQueryPlan: true })
+		.query<StoredAuthDocument>(spec, options)
 		.fetchAll();
 	return response.resources;
 }
@@ -162,12 +195,12 @@ async function readOne(
 	where: readonly CleanedWhere[],
 	mapField: FieldMapper,
 ): Promise<StoredAuthDocument | null> {
-	const id = pointReadId(where);
+	const id = layout.addressableById(model) ? pointReadId(where) : null;
 	if (id !== null) {
 		try {
 			const response = await layout
 				.container(model)
-				.item(id, layout.partitionKey(model, id))
+				.item(id, layout.partitionKeyOf(model, { id }))
 				.read<StoredAuthDocument>();
 			return response.resource ?? null;
 		} catch (error) {
@@ -285,7 +318,7 @@ export function cosmosAdapter(
 				}
 				await layout
 					.container(model)
-					.items.create({ ...data, ...layout.stamp(model) });
+					.items.create({ ...data, ...layout.stamp(model, data) });
 				return data;
 			},
 
@@ -356,10 +389,12 @@ export function cosmosAdapter(
 				if (stored === null) {
 					return null;
 				}
-				const next = { ...stored, ...update, ...layout.stamp(model) };
+				const merged = { ...stored, ...update };
+				const next = { ...merged, ...layout.stamp(model, merged) };
+				assertPartitionUnchanged(layout, model, stored, next);
 				const response = await layout
 					.container(model)
-					.item(stored.id, layout.partitionKey(model, stored.id))
+					.item(stored.id, layout.partitionKeyOf(model, stored))
 					.replace<StoredAuthDocument>(next, {
 						accessCondition: { type: "IfMatch", condition: stored._etag },
 					});
@@ -378,11 +413,13 @@ export function cosmosAdapter(
 				);
 				let updated = 0;
 				for (const stored of documents) {
-					const next = { ...stored, ...update, ...layout.stamp(model) };
+					const merged = { ...stored, ...update };
+					const next = { ...merged, ...layout.stamp(model, merged) };
+					assertPartitionUnchanged(layout, model, stored, next);
 					try {
 						await layout
 							.container(model)
-							.item(stored.id, layout.partitionKey(model, stored.id))
+							.item(stored.id, layout.partitionKeyOf(model, stored))
 							.replace(next, {
 								accessCondition: { type: "IfMatch", condition: stored._etag },
 							});
@@ -404,7 +441,7 @@ export function cosmosAdapter(
 				try {
 					await layout
 						.container(model)
-						.item(stored.id, layout.partitionKey(model, stored.id))
+						.item(stored.id, layout.partitionKeyOf(model, stored))
 						.delete();
 				} catch (error) {
 					if (!isStatus(error, NOT_FOUND)) {
@@ -425,7 +462,7 @@ export function cosmosAdapter(
 					try {
 						await layout
 							.container(model)
-							.item(stored.id, layout.partitionKey(model, stored.id))
+							.item(stored.id, layout.partitionKeyOf(model, stored))
 							.delete();
 						deleted += 1;
 					} catch (error) {
@@ -449,7 +486,7 @@ export function cosmosAdapter(
 				try {
 					await layout
 						.container(model)
-						.item(stored.id, layout.partitionKey(model, stored.id))
+						.item(stored.id, layout.partitionKeyOf(model, stored))
 						.delete({
 							accessCondition: { type: "IfMatch", condition: stored._etag },
 						});

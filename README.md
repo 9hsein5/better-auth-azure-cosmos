@@ -77,6 +77,48 @@ await ensureAuthContainers(database, {
 });
 ```
 
+Every model needs its own container, so `models` has to list every model your configuration
+touches — including the ones plugins add (`organization`, `member`, `invitation`, `team`, and so
+on) and any physical name you remap with `modelName`. A model whose container is missing fails its
+first read with a Cosmos 404 (`Owner resource does not exist`) rather than returning no rows.
+`single-container` needs none of this, because every model shares one container.
+
+#### Sessions on `/tokenHash`
+
+Better Auth resolves a session by its `token` on every authenticated request. Partitioned on `/id`,
+that lookup cannot be scoped to a partition, so the hottest read in the system fans out across all
+of them. Partition the session container on a stored SHA-256 of the token instead:
+
+```ts
+const layout = {
+  kind: "container-per-model",
+  sessionPartition: "tokenHash",
+} as const;
+
+cosmosAdapter(database, { layout });
+await ensureAuthContainers(database, { layout, models: ["user", "session", "account", "verification"] });
+```
+
+The trade is deliberate — token-addressed reads get cheap, user-addressed ones stay unscoped:
+
+| Operation | `id` (default) | `tokenHash` |
+| --- | --- | --- |
+| Resolve a session by token | Cross-partition | Single partition |
+| Update or delete by token | Cross-partition | Single partition |
+| List or revoke a user's sessions | Cross-partition | Cross-partition |
+| Read a session by `id` | Point read | Cross-partition |
+
+Only the digest is stored and routed on: the raw token is a bearer credential and never becomes
+partition-key material. `tokenHash` is storage-only and never reaches Better Auth.
+
+A token is immutable under this strategy. Changing one would move the document to another
+partition, which Cosmos cannot do in place, so such an update is refused rather than written back
+where its new token would no longer find it.
+
+Because a partition key cannot be changed after a container is created, this must be chosen up
+front. An existing deployment needs a new session container rather than an in-place change —
+sessions are short-lived, so letting the old ones expire is usually migration enough.
+
 ## Behaviour and limitations
 
 | Capability | Status |
@@ -98,7 +140,8 @@ enforce uniqueness across documents under either layout. Better Auth's own exist
 but the database will not be the final arbiter of, for example, a duplicate email under a race.
 
 **Query cost.** Only a lookup by `id` is a point read. Every other `where` becomes a query. Under
-the `single-container` layout those queries are scoped by the model prefix of the partition key.
+the `single-container` layout those queries are scoped by the model prefix of the partition key,
+and sessions can be scoped further — see [Sessions on `/tokenHash`](#sessions-on-tokenhash).
 
 ## Testing
 
@@ -112,8 +155,9 @@ npm run emulator:down
 
 Point it at a real account instead with `COSMOS_ENDPOINT`, `COSMOS_KEY` and `COSMOS_DATABASE`.
 
-It runs Better Auth's own `normal`, `authFlow`, `caseInsensitive` and `joins` conformance suites.
-The `numberId` and `transactions` suites are intentionally not run — see the table above.
+It runs Better Auth's own `normal`, `authFlow`, `caseInsensitive` and `joins` conformance suites,
+once per layout, plus routing tests that assert which queries reach a single partition. The
+`numberId` and `transactions` suites are intentionally not run — see the table above.
 
 ## License
 

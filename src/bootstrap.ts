@@ -1,16 +1,46 @@
-import type { Database } from "@azure/cosmos";
-import { PartitionKeyKind } from "@azure/cosmos";
-import {
-	DEFAULT_CONTAINER_NAME,
-	DEFAULT_MODEL_FIELD,
-	type CosmosLayoutOptions,
-} from "./layout";
+import type { Database, PartitionKeyDefinition } from "@azure/cosmos";
+import { ErrorResponse } from "@azure/cosmos";
+import { resolveLayout, type CosmosLayoutOptions } from "./layout";
+
+const CONFLICT = 409;
 
 export type EnsureContainersOptions = {
 	readonly layout?: CosmosLayoutOptions;
 	/** Models to create containers for. Required for the per-model layout. */
 	readonly models?: readonly string[];
 };
+
+/**
+ * `createIfNotExists` reads before it creates, so a container that appears twice in that window is
+ * reported as a conflict rather than returned. It also returns an existing container as-is, and a
+ * partition key cannot be changed afterwards, so the one already there is checked rather than
+ * assumed.
+ */
+async function ensureContainer(
+	database: Database,
+	id: string,
+	partitionKey: PartitionKeyDefinition,
+): Promise<void> {
+	let existing: PartitionKeyDefinition | undefined;
+	try {
+		const { resource } = await database.containers.createIfNotExists({ id, partitionKey });
+		existing = resource?.partitionKey;
+	} catch (error) {
+		if (error instanceof ErrorResponse && error.code === CONFLICT) {
+			return;
+		}
+		throw error;
+	}
+
+	const actual = existing?.paths ?? [];
+	const expected = partitionKey.paths;
+	if (actual.length === expected.length && actual.every((path, index) => path === expected[index])) {
+		return;
+	}
+	throw new Error(
+		`Container "${id}" is partitioned on ${actual.join(", ")}, but this layout needs ${expected.join(", ")}. A partition key cannot be changed after a container is created, so use a new container instead.`,
+	);
+}
 
 /**
  * Creates the containers the adapter expects.
@@ -23,36 +53,17 @@ export async function ensureAuthContainers(
 	options: EnsureContainersOptions = {},
 ): Promise<string[]> {
 	const layout = options.layout ?? { kind: "single-container" };
+	const models = options.models ?? [];
 
-	if (layout.kind === "container-per-model") {
-		const models = options.models ?? [];
-		if (models.length === 0) {
-			throw new Error(
-				"ensureAuthContainers requires `models` when using the container-per-model layout.",
-			);
-		}
-		const nameFor = layout.containerName ?? ((model: string) => model);
-		const created: string[] = [];
-		for (const model of models) {
-			const id = nameFor(model);
-			await database.containers.createIfNotExists({
-				id,
-				partitionKey: { paths: ["/id"] },
-			});
-			created.push(id);
-		}
-		return created;
+	if (layout.kind === "container-per-model" && models.length === 0) {
+		throw new Error(
+			"ensureAuthContainers requires `models` when using the container-per-model layout.",
+		);
 	}
 
-	const id = layout.containerName ?? DEFAULT_CONTAINER_NAME;
-	const modelField = layout.modelField ?? DEFAULT_MODEL_FIELD;
-	await database.containers.createIfNotExists({
-		id,
-		partitionKey: {
-			paths: [`/${modelField}`, "/id"],
-			kind: PartitionKeyKind.MultiHash,
-			version: 2,
-		},
-	});
-	return [id];
+	const required = resolveLayout(database, layout).requiredContainers(models);
+	for (const container of required) {
+		await ensureContainer(database, container.id, container.partitionKey);
+	}
+	return required.map((container) => container.id);
 }

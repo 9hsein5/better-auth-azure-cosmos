@@ -10,3 +10,8 @@ export {
 	type CosmosLayoutOptions,
 } from "./layout";
 export type { AuthDocument, AuthFieldValue, StoredAuthDocument } from "./document";
+export {
+	SESSION_TOKEN_HASH_FIELD,
+	hashSessionToken,
+	type SessionPartitionStrategy,
+} from "./partition";
