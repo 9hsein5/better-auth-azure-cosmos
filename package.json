@@ -1,6 +1,6 @@
 {
   "name": "better-auth-azure-cosmos",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Azure Cosmos DB for NoSQL adapter for Better Auth.",
   "license": "MIT",
   "author": "9hsein5",

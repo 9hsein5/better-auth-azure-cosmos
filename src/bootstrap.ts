@@ -32,14 +32,20 @@ async function ensureContainer(
 		existingUniqueKeys = resource?.uniqueKeyPolicy?.uniqueKeys?.map((k) => (k.paths ?? []).join(","));
 	} catch (error) {
 		if (error instanceof ErrorResponse && error.code === CONFLICT) {
-			return;
+			const { resource } = await database.container(id).read();
+			existing = resource?.partitionKey;
+			existingUniqueKeys = resource?.uniqueKeyPolicy?.uniqueKeys?.map((key) =>
+				(key.paths ?? []).join(","),
+			);
+		} else {
+			throw error;
 		}
-		throw error;
 	}
 
 	const actual = existing?.paths ?? [];
 	const expected = partitionKey.paths;
 	if (actual.length === expected.length && actual.every((path, index) => path === expected[index])) {
+		assertUniqueKeys(id, uniqueKeyPolicy, existingUniqueKeys);
 		return;
 	}
 	throw new Error(

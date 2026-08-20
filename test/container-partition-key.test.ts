@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
-import { CosmosClient } from "@azure/cosmos";
+import { CosmosClient, ErrorResponse } from "@azure/cosmos";
+import type { Database } from "@azure/cosmos";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { ensureAuthContainers } from "../src/index";
@@ -26,6 +27,7 @@ const databases: string[] = [];
 
 const tokenHashLayout = { kind: "container-per-model", sessionPartition: "tokenHash" } as const;
 const idLayout = { kind: "container-per-model" } as const;
+const accountKeyLayout = { kind: "container-per-model", accountPartition: "accountKey" } as const;
 
 async function freshDatabase() {
 	const id = `pk-guard-${randomUUID().slice(0, 8)}`;
@@ -105,4 +107,79 @@ describe("session container partition-key validation", () => {
 			ensureAuthContainers(other, { layout: idLayout, models: ["session"] }),
 		).rejects.toThrow(/partition key/iu);
 	}, 180_000);
+});
+
+/**
+ * The partition key is only half of what makes `(issuer, accountId)` enforceable: without the
+ * unique key policy the container accepts duplicates, while the layout still reports the
+ * constraint as enforced and the startup warning stays silent about it. A container carrying the
+ * right partition key therefore cannot be accepted on that basis alone.
+ */
+describe("account container unique-key validation", () => {
+	const accountUniqueKeys = async (databaseId: string): Promise<string[][]> => {
+		const { resource } = await client.database(databaseId).container("account").read();
+		return (resource?.uniqueKeyPolicy?.uniqueKeys ?? []).map((key) => key.paths ?? []);
+	};
+
+	it("creates the account container with the policy the constraint depends on", async () => {
+		const database = await freshDatabase();
+		await ensureAuthContainers(database, { layout: accountKeyLayout, models: ["account"] });
+		expect(await accountUniqueKeys(database.id)).toStrictEqual([["/issuer", "/accountId"]]);
+	}, 120_000);
+
+	it("is idempotent against an account container that already carries the policy", async () => {
+		const database = await freshDatabase();
+		await ensureAuthContainers(database, { layout: accountKeyLayout, models: ["account"] });
+		await expect(
+			ensureAuthContainers(database, { layout: accountKeyLayout, models: ["account"] }),
+		).resolves.toStrictEqual(["account"]);
+	}, 120_000);
+
+	it("refuses a correctly partitioned account container that has no unique key policy", async () => {
+		const database = await freshDatabase();
+		// Provisioned by hand or by IaC: right partition key, so the partition check passes.
+		await database.containers.createIfNotExists({
+			id: "account",
+			partitionKey: { paths: ["/accountKeyHash"] },
+		});
+
+		await expect(
+			ensureAuthContainers(database, { layout: accountKeyLayout, models: ["account"] }),
+		).rejects.toThrow(/unique key/iu);
+		expect(await accountUniqueKeys(database.id)).toStrictEqual([]);
+	}, 120_000);
+
+	it("refuses an account container whose unique key policy constrains the wrong fields", async () => {
+		const database = await freshDatabase();
+		await database.containers.createIfNotExists({
+			id: "account",
+			partitionKey: { paths: ["/accountKeyHash"] },
+			uniqueKeyPolicy: { uniqueKeys: [{ paths: ["/accountId"] }] },
+		});
+
+		await expect(
+			ensureAuthContainers(database, { layout: accountKeyLayout, models: ["account"] }),
+		).rejects.toThrow(/unique key/iu);
+	}, 120_000);
+
+	it("validates the winning container after a concurrent create reports conflict", async () => {
+		const database = await freshDatabase();
+		await database.containers.createIfNotExists({
+			id: "account",
+			partitionKey: { paths: ["/accountKeyHash"] },
+		});
+
+		const conflict = new ErrorResponse();
+		conflict.code = 409;
+		const raced = {
+			containers: {
+				createIfNotExists: async () => Promise.reject(conflict),
+			},
+			container: (id: string) => database.container(id),
+		} as unknown as Database;
+
+		await expect(
+			ensureAuthContainers(raced, { layout: accountKeyLayout, models: ["account"] }),
+		).rejects.toThrow(/unique key/iu);
+	}, 120_000);
 });
