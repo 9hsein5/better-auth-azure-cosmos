@@ -136,23 +136,40 @@ document here lives in its own. The adapter therefore reports `transaction: fals
 runs those operations sequentially. `consumeOne` is implemented natively so that single-use
 credentials such as magic links and OTPs stay race-safe without a transaction.
 
-**Account identity (`accountPartition`).** **Requires better-auth >= 1.7** — it keys on the
-`issuer` field, which earlier versions do not have, and the adapter refuses to construct without it.
-Better Auth 1.7 resolves an account with
-`findAccountOwnerByKey({ issuer, accountId })` and declares that pair unique. Set
-`accountPartition: "accountKey"` on the `container-per-model` layout to make that constraint real:
-the `account` container is partitioned on `/accountKeyHash` (a stored `sha256(issuer NUL accountId)`)
-and created with a unique key policy on `["/issuer", "/accountId"]`. Because the partition key is
-derived from exactly those paths, every colliding row lands in one logical partition -- the only
-scope a Cosmos unique key has -- so the database rejects a duplicate with a 409.
+**Account identity (`accountPartition`).** Better Auth resolves an account with
+`findAccountOwnerByKey({ providerId, accountId })`. Set `accountPartition: "accountKey"` on the
+`container-per-model` layout to let the database enforce that pair: the `account` container is
+partitioned on `/accountKeyHash` (a stored `sha256(providerId NUL accountId)`) and created with a
+unique key policy on `["/providerId", "/accountId"]`. Because the partition key is derived from
+exactly those paths, every colliding row lands in one logical partition -- the only scope a Cosmos
+unique key has -- so the database rejects a duplicate with a 409. Better Auth 1.7.3+ does not declare
+that pair unique in its core schema; declare it yourself through a plugin `schema` (`account.indexes`)
+if you want the startup warning to track it, and this layout is what makes the declaration true.
 
-The trade is the same one `sessionPartition` makes: resolving an account by issuer becomes
+The trade is the same one `sessionPartition` makes: resolving an account by provider becomes
 partition-scoped, while listing or deleting a user's accounts by `userId` becomes cross-partition.
-It defaults to `"id"`, so existing deployments are unchanged.
+It defaults to `"id"`, so existing deployments are unchanged. On Better Auth 1.7.0–1.7.2, which
+resolve accounts by the since-removed `issuer` field, `accountKey` still constructs and returns
+correct results, but those lookups fall back to cross-partition queries and the `(issuer, accountId)`
+pair those versions rely on is not database-enforced; upgrade to 1.7.3+ for the intended behaviour.
+`accountKey` requires `providerId` and `accountId` to keep their default stored field names; a
+`fields` mapping that renames either is refused at construction.
 
 Both a partition key and a unique key policy are **immutable after a container is created**, so this
 is a decision to make before `ensureAuthContainers` first runs. `single-container` cannot enforce it
 at all: that layout partitions on `[docModel, id]`, giving every row its own logical partition.
+
+> **Upgrading from 0.4.x with `accountKey`.** Versions 0.4.0–0.4.3 hashed the Better Auth 1.7.0–1.7.2
+> `issuer` field, which Better Auth removed again in 1.7.3 (see the
+> [account-schema post](https://better-auth.com/blog/1-7-account-schema)). An `account` container
+> created by 0.4.x therefore carries `accountKeyHash` values and a `["/issuer", "/accountId"]` unique
+> key policy that this version does not produce. `ensureAuthContainers` refuses such a container, but
+> the adapter itself does not inspect containers at runtime -- against an unconverted container every
+> account lookup misses silently and sign-in creates duplicate users -- so run `ensureAuthContainers`
+> before 0.5.0 serves traffic. Export the accounts, drop the container, let `ensureAuthContainers`
+> recreate it, and re-import with the old `accountKeyHash` and `issuer` fields stripped so the new
+> hash is stamped on write; there is no in-place migration because both the partition key and the
+> unique key policy are immutable.
 
 **Rate limiting.** Better Auth declares `rateLimit.key` unique and, when a create is rejected,
 re-reads and increments the existing row instead. Under `/id` nothing rejects the duplicate, so a
@@ -171,7 +188,8 @@ seed, yielding `value` rather than twice it.
 
 **Uniqueness.** Cosmos unique key policies are enforced *within a logical partition*, so a declared
 constraint is enforced only where the partition key is derived from exactly the constrained fields.
-`accountPartition: "accountKey"` does that for `(issuer, accountId)`; no other layout enforces any
+`accountPartition: "accountKey"` does that for `(providerId, accountId)` and `rateLimitPartition: "key"`
+for `rateLimit.key`; no other layout enforces any
 declared constraint. Everything else -- `user.email`, `session.token` -- relies on Better Auth's own
 existence checks, and the database will not be the final arbiter of, for example, a duplicate email
 under a race. At construction the adapter warns, naming exactly the constraints the *active* layout

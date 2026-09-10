@@ -110,7 +110,7 @@ describe("session container partition-key validation", () => {
 });
 
 /**
- * The partition key is only half of what makes `(issuer, accountId)` enforceable: without the
+ * The partition key is only half of what makes `(providerId, accountId)` enforceable: without the
  * unique key policy the container accepts duplicates, while the layout still reports the
  * constraint as enforced and the startup warning stays silent about it. A container carrying the
  * right partition key therefore cannot be accepted on that basis alone.
@@ -124,7 +124,7 @@ describe("account container unique-key validation", () => {
 	it("creates the account container with the policy the constraint depends on", async () => {
 		const database = await freshDatabase();
 		await ensureAuthContainers(database, { layout: accountKeyLayout, models: ["account"] });
-		expect(await accountUniqueKeys(database.id)).toStrictEqual([["/issuer", "/accountId"]]);
+		expect(await accountUniqueKeys(database.id)).toStrictEqual([["/providerId", "/accountId"]]);
 	}, 120_000);
 
 	it("is idempotent against an account container that already carries the policy", async () => {
@@ -160,6 +160,23 @@ describe("account container unique-key validation", () => {
 		await expect(
 			ensureAuthContainers(database, { layout: accountKeyLayout, models: ["account"] }),
 		).rejects.toThrow(/unique key/iu);
+	}, 120_000);
+
+	it("refuses the account container shape that 0.4.x created", async () => {
+		const database = await freshDatabase();
+		// 0.4.x hashed the Better Auth 1.7.0-1.7.2 `issuer` field and constrained that pair. Same
+		// partition path, so only the unique key policy can tell the two layouts apart.
+		await database.containers.createIfNotExists({
+			id: "account",
+			partitionKey: { paths: ["/accountKeyHash"] },
+			uniqueKeyPolicy: { uniqueKeys: [{ paths: ["/issuer", "/accountId"] }] },
+		});
+
+		await expect(
+			ensureAuthContainers(database, { layout: accountKeyLayout, models: ["account"] }),
+		).rejects.toThrow(/unique key/iu);
+		// Refused, not repaired: the policy is immutable, so the old container is left as it was.
+		expect(await accountUniqueKeys(database.id)).toStrictEqual([["/issuer", "/accountId"]]);
 	}, 120_000);
 
 	it("validates the winning container after a concurrent create reports conflict", async () => {
