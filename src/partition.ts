@@ -47,12 +47,6 @@ export function deriveSessionTokenHash(document: AuthDocument): string | null {
   return typeof stored === "string" && stored.length > 0 ? stored : null;
 }
 
-/**
- * Better Auth 1.7 resolves an account with `findAccountOwnerByKey({ issuer, accountId })` and
- * declares that pair unique. A Cosmos unique key is only enforced within a logical partition, so
- * partitioning on a hash of exactly those two fields puts every colliding row in one partition and
- * lets the database enforce the constraint the schema declares.
- */
 export const RATE_LIMIT_MODEL = "rateLimit";
 export const RATE_LIMIT_KEY_FIELD = "key";
 export const RATE_LIMIT_KEY_HASH_FIELD = "keyHash";
@@ -73,16 +67,23 @@ export function rateLimitKeyHashOf(document: AuthDocument): string | null {
 	return typeof key === "string" ? hashRateLimitKey(key) : null;
 }
 
+/**
+ * Better Auth resolves an account with `findAccountOwnerByKey({ providerId, accountId })` and
+ * declares that pair unique (1.6 and 1.7.3+; 1.7.0–1.7.2 keyed on the since-removed `issuer`
+ * field instead). A Cosmos unique key is only enforced within a logical partition, so partitioning
+ * on a hash of exactly those two fields puts every colliding row in one partition and lets the
+ * database enforce the constraint the schema declares.
+ */
 export const ACCOUNT_MODEL = "account";
-export const ACCOUNT_ISSUER_FIELD = "issuer";
+export const ACCOUNT_PROVIDER_ID_FIELD = "providerId";
 export const ACCOUNT_ID_FIELD = "accountId";
 export const ACCOUNT_KEY_HASH_FIELD = "accountKeyHash";
 
 export type AccountPartitionStrategy = "id" | "accountKey";
 
 /** Lowercase hexadecimal, matching `hashSessionToken`. Both halves stay verbatim. */
-export function hashAccountKey(issuer: string, accountId: string): string {
-	return createHash("sha256").update(`${issuer}\u0000${accountId}`, "utf8").digest("hex");
+export function hashAccountKey(providerId: string, accountId: string): string {
+	return createHash("sha256").update(`${providerId}\u0000${accountId}`, "utf8").digest("hex");
 }
 
 export function accountKeyHashOf(document: AuthDocument): string | null {
@@ -90,9 +91,25 @@ export function accountKeyHashOf(document: AuthDocument): string | null {
 	if (typeof stored === "string" && stored.length > 0) {
 		return stored;
 	}
-	const issuer = document[ACCOUNT_ISSUER_FIELD];
+	const providerId = document[ACCOUNT_PROVIDER_ID_FIELD];
 	const accountId = document[ACCOUNT_ID_FIELD];
-	return typeof issuer === "string" && typeof accountId === "string"
-		? hashAccountKey(issuer, accountId)
+	return typeof providerId === "string" && typeof accountId === "string"
+		? hashAccountKey(providerId, accountId)
 		: null;
+}
+
+/**
+ * The hash an account should carry. The identity pair is the source of truth, so a stored hash is
+ * trusted only when the document does not carry the fields it was derived from. This is what lets
+ * an update that changes the pair be refused instead of written under the old partition, and what
+ * re-stamps a document imported with a hash from an older layout.
+ */
+export function deriveAccountKeyHash(document: AuthDocument): string | null {
+	const providerId = document[ACCOUNT_PROVIDER_ID_FIELD];
+	const accountId = document[ACCOUNT_ID_FIELD];
+	if (typeof providerId === "string" && typeof accountId === "string") {
+		return hashAccountKey(providerId, accountId);
+	}
+	const stored = document[ACCOUNT_KEY_HASH_FIELD];
+	return typeof stored === "string" && stored.length > 0 ? stored : null;
 }

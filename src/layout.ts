@@ -4,7 +4,7 @@ import type { CleanedWhere } from "better-auth/adapters";
 import type { AuthDocument } from "./document";
 import {
 	ACCOUNT_ID_FIELD,
-	ACCOUNT_ISSUER_FIELD,
+	ACCOUNT_PROVIDER_ID_FIELD,
 	ACCOUNT_KEY_HASH_FIELD,
 	ACCOUNT_MODEL,
 	RATE_LIMIT_KEY_FIELD,
@@ -14,6 +14,7 @@ import {
 	SESSION_TOKEN_FIELD,
 	SESSION_TOKEN_HASH_FIELD,
 	accountKeyHashOf,
+	deriveAccountKeyHash,
 	deriveSessionTokenHash,
 	hashAccountKey,
 	hashRateLimitKey,
@@ -67,19 +68,21 @@ export type CosmosLayoutOptions =
 			 */
 			readonly sessionPartition?: SessionPartitionStrategy;
 			/**
-			 * Partition strategy for the `account` container. **Requires better-auth >= 1.7**,
-			 * which is where the `issuer` field exists. `id` (the default) keeps it on
+			 * Partition strategy for the `account` container. `id` (the default) keeps it on
 			 * `/id`. `accountKey` partitions on `/accountKeyHash`, a stored
-			 * `sha256(issuer NUL accountId)`, and creates the container with a unique key
-			 * policy on `["/issuer", "/accountId"]`.
+			 * `sha256(providerId NUL accountId)`, and creates the container with a unique key
+			 * policy on `["/providerId", "/accountId"]`.
 			 *
 			 * A Cosmos unique key is only enforced within a logical partition, so this is what
-			 * makes the `["issuer", "accountId"]` uniqueness Better Auth declares actually
-			 * enforceable. Resolving an account by issuer becomes partition-scoped; listing a
+			 * makes the `["providerId", "accountId"]` uniqueness Better Auth declares actually
+			 * enforceable. Resolving an account by provider becomes partition-scoped; listing a
 			 * user's accounts becomes cross-partition.
 			 *
 			 * Both the partition key and the unique key policy are immutable after a container
-			 * is created, so this must be chosen up front.
+			 * is created, so this must be chosen up front. Containers created by 0.4.x hashed
+			 * `issuer` instead (the Better Auth 1.7.0–1.7.2 key, removed again in 1.7.3), so their
+			 * stored `accountKeyHash` values and unique key policy do not match this version;
+			 * recreate the container rather than reusing it.
 			 */
 			readonly accountPartition?: AccountPartitionStrategy;
 		/**
@@ -187,7 +190,7 @@ function rateLimitScopesOf(where: readonly CleanedWhere[]): readonly PartitionKe
 }
 
 function accountScopesOf(where: readonly CleanedWhere[]): readonly PartitionKey[] | null {
-	let issuer: string | null = null;
+	let providerId: string | null = null;
 	let accountId: string | null = null;
 
 	for (const clause of where) {
@@ -200,20 +203,20 @@ function accountScopesOf(where: readonly CleanedWhere[]): readonly PartitionKey[
 		if (clause.field === ACCOUNT_KEY_HASH_FIELD) {
 			return [clause.value];
 		}
-		if (clause.field === ACCOUNT_ISSUER_FIELD) {
-			issuer = clause.value;
+		if (clause.field === ACCOUNT_PROVIDER_ID_FIELD) {
+			providerId = clause.value;
 		}
 		if (clause.field === ACCOUNT_ID_FIELD) {
 			accountId = clause.value;
 		}
 	}
 
-	// Only the complete pair identifies a partition; `accountId` alone is not unique across issuers.
-	return issuer !== null && accountId !== null ? [hashAccountKey(issuer, accountId)] : null;
+	// Only the complete pair identifies a partition; `accountId` alone is not unique across providers.
+	return providerId !== null && accountId !== null ? [hashAccountKey(providerId, accountId)] : null;
 }
 
 /** The fields whose hash forms the account partition key, and thus the only enforceable pair. */
-const ACCOUNT_KEY_FIELDS: readonly string[] = [ACCOUNT_ISSUER_FIELD, ACCOUNT_ID_FIELD];
+export const ACCOUNT_KEY_FIELDS: readonly string[] = [ACCOUNT_PROVIDER_ID_FIELD, ACCOUNT_ID_FIELD];
 
 export function resolveLayout(
 	database: Database,
@@ -236,7 +239,7 @@ export function resolveLayout(
 					const hash = accountKeyHashOf(document);
 					if (hash === null) {
 						throw new Error(
-							"The account container is partitioned by /accountKeyHash, but the document carries neither an accountKeyHash nor an issuer and accountId.",
+							"The account container is partitioned by /accountKeyHash, but the document carries neither an accountKeyHash nor a providerId and accountId.",
 						);
 					}
 					return hash;
@@ -263,7 +266,7 @@ export function resolveLayout(
 			},
 			stamp: (model, data) => {
 				if (isHashedAccount(model)) {
-					const hash = accountKeyHashOf(data);
+					const hash = deriveAccountKeyHash(data);
 					return hash === null ? {} : { [ACCOUNT_KEY_HASH_FIELD]: hash };
 				}
 				if (isHashedRateLimit(model)) {
@@ -309,7 +312,7 @@ export function resolveLayout(
 						? {
 								uniqueKeyPolicy: {
 									uniqueKeys: [
-										{ paths: [`/${ACCOUNT_ISSUER_FIELD}`, `/${ACCOUNT_ID_FIELD}`] },
+										{ paths: [`/${ACCOUNT_PROVIDER_ID_FIELD}`, `/${ACCOUNT_ID_FIELD}`] },
 									],
 								},
 							}

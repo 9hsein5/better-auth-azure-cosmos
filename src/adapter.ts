@@ -21,7 +21,13 @@ import {
 	type AuthFieldValue,
 	type StoredAuthDocument,
 } from "./document";
-import { resolveLayout, type CosmosLayout, type CosmosLayoutOptions } from "./layout";
+import {
+	ACCOUNT_KEY_FIELDS,
+	resolveLayout,
+	type CosmosLayout,
+	type CosmosLayoutOptions,
+} from "./layout";
+import { ACCOUNT_MODEL } from "./partition";
 import {
 	buildWherePredicate,
 	createParameterCollector,
@@ -304,7 +310,7 @@ type DeclaredSchema = Record<
 /**
  * A Cosmos unique key is scoped to a logical partition, so a constraint Better Auth declares
  * globally holds only where the partition key is derived from exactly the constrained fields.
- * `accountPartition: "accountKey"` does that for `(issuer, accountId)`; nothing else does, so
+ * `accountPartition: "accountKey"` does that for `(providerId, accountId)`; nothing else does, so
  * `user.email` and the rest fall back to Better Auth's own existence checks.
  *
  * Silence would read as protection, but so would a false alarm read as noise: naming a
@@ -340,19 +346,26 @@ function warnUnenforceableUniqueness(schema: DeclaredSchema, layout: CosmosLayou
 }
 
 /**
- * `accountKey` partitions on a hash of `issuer` + `accountId`, and `issuer` only exists from Better
- * Auth 1.7. Without it every account write would fail deep inside `partitionKeyOf`, so the cause is
- * reported once, at construction.
+ * `accountKey` hashes and constrains the stored `providerId` and `accountId` fields under exactly
+ * those names, so a configuration that maps either logical field to a different stored name would
+ * leave every account write without a partition key and the unique key policy without a value. The
+ * cause is reported once, at construction, instead of deep inside `partitionKeyOf`.
  */
-function assertAccountKeySupported(layout: CosmosLayoutOptions | undefined, schema: DeclaredSchema): void {
+function assertAccountKeySupported(
+	layout: CosmosLayoutOptions | undefined,
+	getFieldName: (reference: { model: string; field: string }) => string,
+): void {
 	if (layout?.kind !== "container-per-model" || layout.accountPartition !== "accountKey") {
 		return;
 	}
-	if (schema["account"]?.fields["issuer"] !== undefined) {
+	const renamed = ACCOUNT_KEY_FIELDS.filter(
+		(field) => getFieldName({ model: ACCOUNT_MODEL, field }) !== field,
+	);
+	if (renamed.length === 0) {
 		return;
 	}
 	throw new Error(
-		'The layout sets accountPartition: "accountKey", but this Better Auth version has no `issuer` field on the account model. That strategy requires better-auth >= 1.7.',
+		`The layout sets accountPartition: "accountKey", which stores and constrains ${ACCOUNT_KEY_FIELDS.map((field) => `\`${field}\``).join(" and ")} under those exact names, but the account model maps ${renamed.map((field) => `\`${field}\``).join(" and ")} to a different field name. Remove the mapping or use accountPartition: "id".`,
 	);
 }
 
@@ -379,7 +392,7 @@ export function cosmosAdapter(
 		},
 		adapter: ({ getFieldName, getDefaultModelName, schema }) => {
 			warnUnenforceableUniqueness(schema, layout);
-			assertAccountKeySupported(config.layout, schema);
+			assertAccountKeySupported(config.layout, getFieldName);
 
 			const mapperFor =
 				(model: string): FieldMapper =>
