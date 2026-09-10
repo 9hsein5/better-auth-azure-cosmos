@@ -127,6 +127,7 @@ sessions are short-lived, so letting the old ones expire is usually migration en
 | `consumeOne` | Native, via an ETag (`If-Match`) conditional delete |
 | Joins | Supported, resolved as follow-up queries |
 | Case-insensitive matching | Supported, via `STRINGEQUALS` / `CONTAINS` / `STARTSWITH` / `ENDSWITH` |
+| Null equality | Matches both omitted fields and explicit JSON `null` |
 | Dates | Stored as ISO strings — Cosmos JSON has no date type |
 | Numeric ids | Not supported; ids are strings |
 | Transactions | Not supported |
@@ -148,12 +149,19 @@ if you want the startup warning to track it, and this layout is what makes the d
 
 The trade is the same one `sessionPartition` makes: resolving an account by provider becomes
 partition-scoped, while listing or deleting a user's accounts by `userId` becomes cross-partition.
-It defaults to `"id"`, so existing deployments are unchanged. On Better Auth 1.7.0–1.7.2, which
-resolve accounts by the since-removed `issuer` field, `accountKey` still constructs and returns
-correct results, but those lookups fall back to cross-partition queries and the `(issuer, accountId)`
-pair those versions rely on is not database-enforced; upgrade to 1.7.3+ for the intended behaviour.
+It defaults to `"id"`, so existing deployments are unchanged. `accountKey` refuses an account schema
+with a required `issuer` field, including Better Auth 1.7.0-1.7.2, because the provider-based key
+cannot enforce those versions' identity guarantee. Use Better Auth 1.6.x or 1.7.3+ without that
+legacy requirement, or choose `"id"` with no database-enforced account identity uniqueness.
 `accountKey` requires `providerId` and `accountId` to keep their default stored field names; a
 `fields` mapping that renames either is refused at construction.
+
+All hash strategies require the affected model to keep its default `modelName` and hashed field
+names: `account.providerId`/`account.accountId`, `session.token`, and `rateLimit.key`. Use the
+layout's `containerName` callback to customize physical container names instead, and pass the
+default model names to `ensureAuthContainers`. The `/id` strategies continue to support model and
+field mappings. Updates, bulk updates, and `incrementOne` all reject changes that would move a
+document to another partition.
 
 Both a partition key and a unique key policy are **immutable after a container is created**, so this
 is a decision to make before `ensureAuthContainers` first runs. `single-container` cannot enforce it
@@ -177,14 +185,20 @@ concurrent first burst seeds one row per request and each gets its own budget --
 concurrent requests admitting 11 against a limit of 3, across 10 rows. Set
 `rateLimitPartition: "key"` to partition that container on `/keyHash` with `key` as its unique
 key; the second concurrent seed is then rejected and Better Auth's own recovery path takes over.
-The limit check itself lives in the caller's `where` (`count < max`), and `incrementOne` guards
-the write with an `If-Match` ETag whenever a `set` is present, which is what serialises the
-check-then-act. Removing that guard would let every racing caller win at once.
+The limit check itself lives in the caller's `where` (`count < max`). `incrementOne` protects
+predicates other than a single ID equality with an `If-Match` ETag, whether or not `set` is present.
+On a conflict it re-reads using the complete predicate before retrying. A predicate that no longer
+matches returns `null`; repeated contention exhausts a bounded retry budget and throws instead of
+silently losing an increment.
 
-**`incrementOne` seeding.** Increments are applied with `incr` and no precondition, so concurrent
-increments compose. A field that does not exist yet cannot be incremented, so it is seeded with
-`set` from a read -- and that seeding write does not compose. Two concurrent first-increments both
-seed, yielding `value` rather than twice it.
+**`incrementOne` seeding.** Existing numeric counters selected only by ID use atomic `incr`
+operations without a precondition. Missing or null counters start at zero and are seeded using
+an ETag-protected `set`. Concurrent first increments retry against the updated row, so they
+compose rather than overwrite one another. Any explicit `set` also uses the snapshot guard.
+
+Cosmos permits at most ten patch operations per document. Wider `incrementOne` mutations use one
+ETag-protected document replacement with the same retry and partition checks; they are never split
+into separate, partially applied writes.
 
 **Uniqueness.** Cosmos unique key policies are enforced *within a logical partition*, so a declared
 constraint is enforced only where the partition key is derived from exactly the constrained fields.

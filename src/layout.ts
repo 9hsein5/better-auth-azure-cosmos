@@ -15,6 +15,7 @@ import {
 	SESSION_TOKEN_HASH_FIELD,
 	accountKeyHashOf,
 	deriveAccountKeyHash,
+	deriveRateLimitKeyHash,
 	deriveSessionTokenHash,
 	hashAccountKey,
 	hashRateLimitKey,
@@ -270,7 +271,7 @@ export function resolveLayout(
 					return hash === null ? {} : { [ACCOUNT_KEY_HASH_FIELD]: hash };
 				}
 				if (isHashedRateLimit(model)) {
-					const hash = rateLimitKeyHashOf(data);
+					const hash = deriveRateLimitKeyHash(data);
 					return hash === null ? {} : { [RATE_LIMIT_KEY_HASH_FIELD]: hash };
 				}
 				if (!isHashedSession(model)) {

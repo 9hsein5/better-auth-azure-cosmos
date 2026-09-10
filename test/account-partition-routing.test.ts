@@ -235,4 +235,34 @@ describe("account /accountKeyHash partition strategy", () => {
 		expect(updated?.scope).toBe("read:user");
 		expect(updated).not.toHaveProperty("accountKeyHash");
 	}, 120_000);
+
+	it("preserves hashing and uniqueness with a custom physical container name", async () => {
+		const namedLayout = { ...layout, containerName: (model: string) => `named_${model}` };
+		await ensureAuthContainers(database, { layout: namedLayout, models: ["account"] });
+		const namedAdapter = cosmosAdapter(database, { layout: namedLayout })({});
+		const data = {
+			id: randomUUID(),
+			providerId: "named-provider",
+			accountId: randomUUID(),
+			userId: randomUUID(),
+			createdAt: new Date(),
+			updatedAt: new Date(),
+		};
+		await namedAdapter.create({ model: "account", data, forceAllowId: true });
+		await expect(namedAdapter.create({
+			model: "account",
+			data: { ...data, id: randomUUID(), userId: randomUUID() },
+			forceAllowId: true,
+		})).rejects.toMatchObject({ code: 409 });
+
+		const found = await namedAdapter.findMany<AccountRow>({
+			model: "account",
+			where: [...identityWhere(data.providerId, data.accountId)],
+		});
+		expect(found.map((row) => row.id)).toEqual([data.id]);
+		const { resource } = await database.container("named_account")
+			.item(data.id, hashAccountKey(data.providerId, data.accountId))
+			.read<Record<string, unknown>>();
+		expect(resource?.accountKeyHash).toBe(hashAccountKey(data.providerId, data.accountId));
+	}, 120_000);
 });

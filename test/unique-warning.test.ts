@@ -1,4 +1,5 @@
 import type { Database } from "@azure/cosmos";
+import { getAuthTables } from "@better-auth/core/db";
 import type { BetterAuthOptions, BetterAuthPlugin } from "better-auth";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -93,10 +94,63 @@ describe("declared uniqueness that Cosmos cannot enforce", () => {
 		expect(message).toContain("user.email");
 	});
 
-	it("constructs the enforcing layout without a live connection", () => {
-		// `accountKey` hashes core account fields, so construction must not refuse on any
-		// supported Better Auth version.
-		expect(() => construct(enforcingLayout)).not.toThrow();
+	it("gates accountKey against the installed identity schema without a connection", () => {
+		const constructAdapter = () => construct(enforcingLayout);
+		if (getAuthTables({})["account"]?.fields["issuer"]?.required) {
+			expect(constructAdapter).toThrow(/issuer.*1\.7\.3/u);
+		} else {
+			expect(constructAdapter).not.toThrow();
+		}
+		expect(() => construct({ kind: "container-per-model" })).not.toThrow();
+	});
+
+	it("refuses a required legacy issuer schema only for accountKey", () => {
+		const options: BetterAuthOptions = {
+			plugins: [{
+				id: "legacy-issuer",
+				schema: { account: { fields: { issuer: { type: "string", required: true } } } },
+			}],
+		};
+		expect(() => construct(enforcingLayout, options)).toThrow(/issuer.*1\.7\.3/u);
+		expect(() => construct(layout, options)).not.toThrow();
+	});
+
+	it("allows an optional issuer field unrelated to core identity", () => {
+		expect(() => construct(enforcingLayout, {
+			plugins: [{
+				id: "optional-issuer",
+				schema: { account: { fields: { issuer: { type: "string", required: false } } } },
+			}],
+		})).not.toThrow();
+	});
+
+	it.each([
+		{ model: "account", options: enforcingLayout, authOptions: { account: { modelName: "externalAccount" } } },
+		{ model: "session", options: layout, authOptions: { session: { modelName: "sessions" } } },
+		{
+			model: "rateLimit",
+			options: { kind: "container-per-model", rateLimitPartition: "key" },
+			authOptions: { rateLimit: { storage: "database", modelName: "limits" } },
+		},
+	] as const)("refuses a renamed hashed $model model", ({ options, authOptions }) => {
+		expect(() => construct(options, authOptions)).toThrow(/modelName.*containerName/u);
+		expect(() => construct({ kind: "container-per-model" }, authOptions)).not.toThrow();
+	});
+
+	it("allows physical container naming with hash strategies", () => {
+		expect(() => construct({
+			...enforcingLayout,
+			containerName: (model) => `auth_${model}`,
+		})).not.toThrow();
+	});
+
+	it("refuses renamed session and rate-limit partition fields", () => {
+		expect(() => construct(layout, {
+			session: { fields: { token: "credential" } },
+		})).toThrow(/token/u);
+		expect(() => construct({ kind: "container-per-model", rateLimitPartition: "key" }, {
+			rateLimit: { storage: "database", fields: { key: "limiterKey" } },
+		})).toThrow(/key/u);
 	});
 
 	it("refuses the enforcing layout when a hashed account field is mapped to another name", () => {

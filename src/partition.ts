@@ -43,6 +43,9 @@ export function deriveSessionTokenHash(document: AuthDocument): string | null {
   if (typeof token === "string") {
     return hashSessionToken(token);
   }
+	if (SESSION_TOKEN_FIELD in document) {
+		throw new Error("The session partition requires a string token.");
+	}
   const stored = document[SESSION_TOKEN_HASH_FIELD];
   return typeof stored === "string" && stored.length > 0 ? stored : null;
 }
@@ -65,6 +68,18 @@ export function rateLimitKeyHashOf(document: AuthDocument): string | null {
 	}
 	const key = document[RATE_LIMIT_KEY_FIELD];
 	return typeof key === "string" ? hashRateLimitKey(key) : null;
+}
+
+export function deriveRateLimitKeyHash(document: AuthDocument): string | null {
+	const key = document[RATE_LIMIT_KEY_FIELD];
+	if (typeof key === "string") {
+		return hashRateLimitKey(key);
+	}
+	if (RATE_LIMIT_KEY_FIELD in document) {
+		throw new Error("The rateLimit partition requires a string key.");
+	}
+	const stored = document[RATE_LIMIT_KEY_HASH_FIELD];
+	return typeof stored === "string" && stored.length > 0 ? stored : null;
 }
 
 /**
@@ -109,6 +124,9 @@ export function deriveAccountKeyHash(document: AuthDocument): string | null {
 	const accountId = document[ACCOUNT_ID_FIELD];
 	if (typeof providerId === "string" && typeof accountId === "string") {
 		return hashAccountKey(providerId, accountId);
+	}
+	if (ACCOUNT_PROVIDER_ID_FIELD in document || ACCOUNT_ID_FIELD in document) {
+		throw new Error("The account partition requires string providerId and accountId fields.");
 	}
 	const stored = document[ACCOUNT_KEY_HASH_FIELD];
 	return typeof stored === "string" && stored.length > 0 ? stored : null;

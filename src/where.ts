@@ -94,6 +94,15 @@ function clauseToSql(
 	const caseArgument = insensitive ? ", true" : "";
 	const operator = clause.operator ?? "eq";
 
+	if (clause.value === null) {
+		if (operator === "eq") {
+			return `(NOT IS_DEFINED(${path}) OR IS_NULL(${path}))`;
+		}
+		if (operator === "ne") {
+			return `(IS_DEFINED(${path}) AND NOT IS_NULL(${path}))`;
+		}
+	}
+
 	switch (operator) {
 		case "eq":
 			return insensitive

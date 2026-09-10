@@ -27,7 +27,13 @@ import {
 	type CosmosLayout,
 	type CosmosLayoutOptions,
 } from "./layout";
-import { ACCOUNT_MODEL } from "./partition";
+import {
+	ACCOUNT_MODEL,
+	RATE_LIMIT_KEY_FIELD,
+	RATE_LIMIT_MODEL,
+	SESSION_MODEL,
+	SESSION_TOKEN_FIELD,
+} from "./partition";
 import {
 	buildWherePredicate,
 	createParameterCollector,
@@ -37,6 +43,7 @@ import {
 
 const NOT_FOUND = 404;
 const PRECONDITION_FAILED = 412;
+const MAX_INCREMENT_ATTEMPTS = 16;
 
 export type CosmosAdapterConfig = {
 	readonly layout?: CosmosLayoutOptions;
@@ -302,7 +309,10 @@ function asResult<T>(document: AuthDocument): T {
 type DeclaredSchema = Record<
 	string,
 	{
-		readonly fields: Record<string, { readonly unique?: boolean | undefined }>;
+		readonly fields: Record<string, {
+			readonly unique?: boolean | undefined;
+			readonly required?: boolean | undefined;
+		}>;
 		readonly indexes?: readonly { readonly fields: readonly string[]; readonly unique?: boolean | undefined }[] | undefined;
 	}
 >;
@@ -345,28 +355,41 @@ function warnUnenforceableUniqueness(schema: DeclaredSchema, layout: CosmosLayou
 	);
 }
 
-/**
- * `accountKey` hashes and constrains the stored `providerId` and `accountId` fields under exactly
- * those names, so a configuration that maps either logical field to a different stored name would
- * leave every account write without a partition key and the unique key policy without a value. The
- * cause is reported once, at construction, instead of deep inside `partitionKeyOf`.
- */
-function assertAccountKeySupported(
+function assertPartitionStrategiesSupported(
 	layout: CosmosLayoutOptions | undefined,
+	schema: DeclaredSchema,
+	getModelName: (model: string) => string,
 	getFieldName: (reference: { model: string; field: string }) => string,
 ): void {
-	if (layout?.kind !== "container-per-model" || layout.accountPartition !== "accountKey") {
+	if (layout?.kind !== "container-per-model") {
 		return;
 	}
-	const renamed = ACCOUNT_KEY_FIELDS.filter(
-		(field) => getFieldName({ model: ACCOUNT_MODEL, field }) !== field,
-	);
-	if (renamed.length === 0) {
-		return;
+	if (layout.accountPartition === "accountKey" && schema[ACCOUNT_MODEL]?.fields["issuer"]?.required) {
+		throw new Error(
+			'accountPartition: "accountKey" cannot enforce an issuer-based account schema. Use Better Auth 1.6.x or 1.7.3+ without a required legacy issuer field, or use accountPartition: "id" without database-enforced identity uniqueness.',
+		);
 	}
-	throw new Error(
-		`The layout sets accountPartition: "accountKey", which stores and constrains ${ACCOUNT_KEY_FIELDS.map((field) => `\`${field}\``).join(" and ")} under those exact names, but the account model maps ${renamed.map((field) => `\`${field}\``).join(" and ")} to a different field name. Remove the mapping or use accountPartition: "id".`,
-	);
+	const strategies = [
+		{ enabled: layout.accountPartition === "accountKey", model: ACCOUNT_MODEL, fields: ACCOUNT_KEY_FIELDS },
+		{ enabled: layout.sessionPartition === "tokenHash", model: SESSION_MODEL, fields: [SESSION_TOKEN_FIELD] },
+		{ enabled: layout.rateLimitPartition === "key", model: RATE_LIMIT_MODEL, fields: [RATE_LIMIT_KEY_FIELD] },
+	];
+	for (const { enabled, model, fields } of strategies) {
+		if (!enabled || !schema[model]) {
+			continue;
+		}
+		if (getModelName(model) !== model) {
+			throw new Error(
+				`The hashed ${model} partition strategy requires its default modelName. Remove the ${model}.modelName mapping and use layout.containerName to rename the physical container, or use the id partition strategy.`,
+			);
+		}
+		const renamed = fields.filter((field) => getFieldName({ model, field }) !== field);
+		if (renamed.length > 0) {
+			throw new Error(
+				`The hashed ${model} partition strategy requires the default stored field names: ${renamed.join(", ")}. Remove these field mappings or use the id partition strategy.`,
+			);
+		}
+	}
 }
 
 export function cosmosAdapter(
@@ -390,9 +413,9 @@ export function cosmosAdapter(
 			// document here has its own. consumeOne covers the case needing atomicity.
 			transaction: false,
 		},
-		adapter: ({ getFieldName, getDefaultModelName, schema }) => {
+		adapter: ({ getFieldName, getModelName, getDefaultModelName, schema }) => {
+			assertPartitionStrategiesSupported(config.layout, schema, getModelName, getFieldName);
 			warnUnenforceableUniqueness(schema, layout);
-			assertAccountKeySupported(config.layout, getFieldName);
 
 			const mapperFor =
 				(model: string): FieldMapper =>
@@ -521,72 +544,69 @@ export function cosmosAdapter(
 				return countDocuments(layout, model, where ?? [], mapperFor(model));
 			},
 
-			/**
-			 * Optional in Better Auth 1.6 and required from 1.7, so it is implemented here to keep a
-			 * single build working against both.
-			 *
-			 * Deliberately issued without an ETag precondition: `incr` is applied server-side, so
-			 * concurrent increments compose instead of one losing to a 412. That is the point of a
-			 * counter. A field that does not exist yet cannot be incremented, so it is seeded with
-			 * `set` -- treating absent as zero. That seeding write does NOT compose: two concurrent
-			 * first-increments both `set`, so the result is `value`, not `2 x value`. Composition
-			 * holds once the field exists as a number.
-			 */
 			async incrementOne({ model, where, increment, set }) {
 				const mapField = mapperFor(model);
-				const stored = await readOne(layout, model, where, mapField);
-				if (stored === null) {
-					return null;
-				}
+				for (let attempt = 0; attempt < MAX_INCREMENT_ATTEMPTS; attempt += 1) {
+					const stored = await readOne(layout, model, where, mapField);
+					if (stored === null) {
+						return null;
+					}
 
-				const operations: PatchOperation[] = [];
-				for (const [field, value] of Object.entries(increment)) {
-					const path = patchPath(mapField(field));
-					operations.push(
-						typeof stored[path.slice(1)] === "number"
-							? { op: "incr", path, value }
-							: { op: "set", path, value },
-					);
-				}
-				for (const [field, value] of Object.entries(set ?? {})) {
-					operations.push({
-						op: "set",
-						path: patchPath(mapField(field)),
-						value: value as AuthFieldValue,
-					});
-				}
-				if (operations.length === 0) {
-					return asResult(toAuthDocument(stored, layout.reservedFields));
-				}
-
-				// Two different intents share this method. A pure counter must compose under
-				// contention, so it is applied with no precondition. A guarded transition (`set`) must
-				// not apply if the row moved after the guard was evaluated, so it carries the ETag and
-				// reports a lost race the same way a guard miss is reported: null.
-				// A `set` means the caller is doing compare-and-set: Better Auth expresses the guard in
-				// the `where` (`count < max`, or a previous value), and the ETag is what serialises the
-				// check-then-act it read. Dropping it there would admit every racing caller at once.
-				const guarded = Object.keys(set ?? {}).length > 0;
-				try {
-					const response = await layout
-						.container(model)
-						.item(stored.id, layout.partitionKeyOf(model, stored))
-						.patch<StoredAuthDocument>(
-							{ operations },
-							guarded
-								? { accessCondition: { type: "IfMatch", condition: stored._etag } }
-								: undefined,
+					const operations: PatchOperation[] = [];
+					const next: StoredAuthDocument = { ...stored };
+					for (const [field, value] of Object.entries(increment)) {
+						const path = patchPath(mapField(field));
+						const current = stored[path.slice(1)];
+						next[path.slice(1)] = (typeof current === "number" ? current : 0) + value;
+						operations.push(
+							typeof current === "number"
+								? { op: "incr", path, value }
+								: { op: "set", path, value },
 						);
-					if (!response.resource) {
-						return null;
 					}
-					return asResult(toAuthDocument(response.resource, layout.reservedFields));
-				} catch (error) {
-					if (isStatus(error, PRECONDITION_FAILED)) {
-						return null;
+					for (const [field, value] of Object.entries(set ?? {})) {
+						const storedField = mapField(field);
+						next[storedField] = value as AuthFieldValue;
+						operations.push({
+							op: "set",
+							path: patchPath(storedField),
+							value: value as AuthFieldValue,
+						});
 					}
-					throw error;
+					if (operations.length === 0) {
+						return asResult(toAuthDocument(stored, layout.reservedFields));
+					}
+
+					assertPartitionUnchanged(layout, model, stored, { ...next, ...layout.stamp(model, next) });
+					const needsSnapshot =
+						pointReadId(where) === null || operations.some((operation) => operation.op === "set");
+					try {
+						const item = layout
+							.container(model)
+							.item(stored.id, layout.partitionKeyOf(model, stored));
+						const snapshotOptions = {
+							accessCondition: { type: "IfMatch", condition: stored._etag },
+						};
+						const response = operations.length > 10
+							? await item.replace<StoredAuthDocument>(next, snapshotOptions)
+							: await item.patch<StoredAuthDocument>(
+								{ operations },
+								needsSnapshot ? snapshotOptions : undefined,
+							);
+						return response.resource
+							? asResult(toAuthDocument(response.resource, layout.reservedFields))
+							: null;
+					} catch (error) {
+						if (isStatus(error, PRECONDITION_FAILED)) {
+							continue;
+						}
+						if (isStatus(error, NOT_FOUND)) {
+							return null;
+						}
+						throw error;
+					}
 				}
+				throw new Error(`Could not increment ${model} after repeated concurrent changes. Retry the operation.`);
 			},
 
 

@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import { CosmosClient } from "@azure/cosmos";
 import type { Database } from "@azure/cosmos";
+import { betterAuth } from "better-auth";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { ensureAuthContainers, hashRateLimitKey } from "../src/index";
+import { cosmosAdapter, ensureAuthContainers, hashRateLimitKey } from "../src/index";
 
 /**
  * Better Auth declares `rateLimit.key` unique and recovers from a rejected create by re-reading
@@ -81,5 +82,44 @@ describe("rateLimit on /keyHash", () => {
 		);
 
 		expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+	}, 120_000);
+
+	it("limits real HTTP bursts and window resets without sharing client budgets", async () => {
+		const auth = betterAuth({
+			baseURL: "http://localhost:3000",
+			secret: "release-validation-only-secret-not-for-production",
+			database: cosmosAdapter(database, { layout }),
+			rateLimit: { enabled: true, storage: "database", window: 60, max: 3 },
+			advanced: { ipAddress: { ipAddressHeaders: ["x-forwarded-for"] } },
+		});
+		const context = await auth.$context;
+		const request = (address: string) => auth.handler(new Request(
+			"http://localhost:3000/api/auth/get-session",
+			{ headers: { "x-forwarded-for": address } },
+		));
+
+		for (const round of ["initial", "expired"]) {
+			const responses = await Promise.all(Array.from({ length: 12 }, () => request("203.0.113.41")));
+			expect(responses.filter((response) => response.status === 200), round).toHaveLength(3);
+			expect(responses.filter((response) => response.status === 429), round).toHaveLength(9);
+			for (const response of responses.filter((result) => result.status === 429)) {
+				expect(Number(response.headers.get("x-retry-after"))).toBeGreaterThan(0);
+			}
+			const rows = await context.adapter.findMany<{ id: string; count: number }>({
+				model: "rateLimit",
+				where: [{ field: "count", value: 3 }],
+			});
+			expect(rows).toHaveLength(1);
+			if (round === "initial") {
+				await context.adapter.update({
+					model: "rateLimit",
+					where: [{ field: "id", value: rows[0]!.id }],
+					update: { lastRequest: Date.now() - 120_000 },
+				});
+			}
+		}
+
+		expect((await request("203.0.113.42")).status).toBe(200);
+		expect((await request("203.0.113.41")).status).toBe(429);
 	}, 120_000);
 });

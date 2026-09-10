@@ -1,6 +1,6 @@
 {
   "name": "better-auth-azure-cosmos",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Azure Cosmos DB for NoSQL adapter for Better Auth.",
   "license": "MIT",
   "author": "9hsein5",
@@ -32,9 +32,14 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     }
   },
   "scripts": {
@@ -58,7 +63,7 @@
     "better-auth": "1.7.4",
     "tsdown": "^0.15.0",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "engines": {
     "node": ">=20"
