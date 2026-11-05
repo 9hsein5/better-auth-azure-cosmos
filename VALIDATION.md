@@ -17,6 +17,13 @@ Publication uses the existing GitHub release workflow, which requires the full t
 matrix on Node 22, 24 and 26 before publishing with provenance. The registry and release
 workflow are the source of truth for publication status.
 
+The initial hosted run caught an emulator-version difference before any npm upload:
+EN20261019 returns HTTP 400/substatus 1003 for a missing container's query plan, whereas
+EN20260907 returned 404. Direct SDK probes reproduced the difference; metadata and
+point-read paths still report 404. The regression now checks the exact two query-error
+shapes, still requires a genuine SDK error and retains the strict 404 point-read check.
+No adapter implementation or successful-result fallback was changed.
+
 ## Current working tree: dependency and correctness update
 
 Date: 2026-11-04. These results cover the updated working tree, not a published release.

@@ -291,11 +291,20 @@ describe.each(layouts)("$name adapter regressions", ({ layout }) => {
 			? { ...layout, containerName: missingName }
 			: { ...layout, containerName: () => missingName };
 		const a = cosmosAdapter(database, { layout: missingLayout })(options);
-		for (const where of [
-			[{ field: "id", value: randomUUID() }],
-			[{ field: "email", value: "missing@example.test" }],
-		]) {
-			await expect(a.findOne({ model: "user", where })).rejects.toMatchObject({ code: 404 });
+		await expect(a.findOne({
+			model: "user",
+			where: [{ field: "id", value: randomUUID() }],
+		})).rejects.toMatchObject({ code: 404 });
+		const queryError: unknown = await a.findOne({
+			model: "user",
+			where: [{ field: "email", value: "missing@example.test" }],
+		}).catch((error: unknown) => error);
+		expect(queryError).toBeInstanceOf(ErrorResponse);
+		// EN20261019 returns 400/1003 for a missing collection's query plan, rather than 404.
+		if (queryError instanceof ErrorResponse && queryError.code === 400) {
+			expect(queryError.substatus).toBe(1003);
+		} else {
+			expect(queryError).toMatchObject({ code: 404 });
 		}
 	});
 
