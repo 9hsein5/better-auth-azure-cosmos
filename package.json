@@ -1,6 +1,6 @@
 {
   "name": "better-auth-azure-cosmos",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Azure Cosmos DB for NoSQL adapter for Better Auth.",
   "license": "MIT",
   "author": "9hsein5",
@@ -46,27 +46,29 @@
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:package": "node --test test/package-smoke.mjs",
     "test:watch": "vitest",
     "emulator:up": "docker compose -f test/docker-compose.yml up -d --wait",
     "emulator:down": "docker compose -f test/docker-compose.yml down -v",
-    "verify": "npm run typecheck && npm run build && npm run test",
+    "verify": "npm run typecheck && npm run build && npm run test:package && npm run test",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
-    "@azure/cosmos": "^4.0.0",
-    "better-auth": ">=1.6.0"
+    "@azure/cosmos": "^4.10.1",
+    "better-auth": "^1.7.17"
   },
   "devDependencies": {
-    "@azure/cosmos": "^4.5.0",
-    "@better-auth/test-utils": "1.7.4",
-    "@types/node": "^22.10.0",
-    "better-auth": "1.7.4",
-    "tsdown": "^0.15.0",
-    "typescript": "^5.7.0",
-    "vitest": "^4.1.11"
+    "@azure/cosmos": "^4.10.1",
+    "@better-auth/core": "1.7.17",
+    "@better-auth/test-utils": "1.7.17",
+    "@types/node": "^22.20.5",
+    "better-auth": "1.7.17",
+    "tsdown": "^0.23.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": "^22.18.0 || ^24.11.0 || >=26.0.0"
   },
   "publishConfig": {
     "access": "public",

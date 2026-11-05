@@ -9,7 +9,7 @@ services:
     environment:
       PROTOCOL: https
     healthcheck:
-      test: ["CMD-SHELL", "curl -ksf https://localhost:8081/_explorer/emulator.pem > /dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/ready | grep -Eq '\"ready\"[[:space:]]*:[[:space:]]*true'"]
       interval: 10s
       timeout: 10s
       retries: 30

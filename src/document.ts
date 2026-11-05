@@ -17,6 +17,8 @@ export type StoredAuthDocument = AuthDocument & {
 	_etag: string;
 };
 
+const SYSTEM_FIELDS = new Set(["_rid", "_self", "_etag", "_attachments", "_ts", "_lsn"]);
+
 /**
  * Removes Cosmos system properties and any field the layout added, so Better
  * Auth only ever sees fields that exist in its own schema.
@@ -25,12 +27,9 @@ export function toAuthDocument(
 	stored: StoredAuthDocument,
 	reservedFields: readonly string[],
 ): AuthDocument {
-	const result: AuthDocument = {};
-	for (const [key, value] of Object.entries(stored)) {
-		if (key.startsWith("_") || reservedFields.includes(key)) {
-			continue;
-		}
-		result[key] = value;
-	}
-	return result;
+	return Object.fromEntries(
+		Object.entries(stored).filter(([key]) =>
+			!SYSTEM_FIELDS.has(key) && !reservedFields.includes(key),
+		),
+	);
 }

@@ -83,11 +83,10 @@ export function deriveRateLimitKeyHash(document: AuthDocument): string | null {
 }
 
 /**
- * Better Auth resolves an account with `findAccountOwnerByKey({ providerId, accountId })` and
- * declares that pair unique (1.6 and 1.7.3+; 1.7.0–1.7.2 keyed on the since-removed `issuer`
- * field instead). A Cosmos unique key is only enforced within a logical partition, so partitioning
- * on a hash of exactly those two fields puts every colliding row in one partition and lets the
- * database enforce the constraint the schema declares.
+ * Better Auth resolves an account with `findAccountOwnerByKey({ providerId, accountId })`.
+ * A Cosmos unique key is only enforced within a logical partition, so hashing exactly those
+ * fields puts every colliding row in one partition. The accountKey layout enforces the pair
+ * even when the application's Better Auth schema does not declare that unique index.
  */
 export const ACCOUNT_MODEL = "account";
 export const ACCOUNT_PROVIDER_ID_FIELD = "providerId";

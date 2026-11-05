@@ -16,7 +16,13 @@ Cosmos DB for NoSQL is not one of Better Auth's built-in adapters. This package 
 npm install better-auth-azure-cosmos @azure/cosmos
 ```
 
-`better-auth` (>= 1.6.0) and `@azure/cosmos` (^4) are peer dependencies.
+`better-auth` (^1.7.17) and `@azure/cosmos` (^4.10.1) are peer dependencies.
+Supported Node.js releases are 22.18+ on the 22.x line, 24.11+ on the 24.x line, and 26+.
+Use a current patched release within a supported line.
+
+**Upgrading an existing installation:** Node 20 and Better Auth versions below 1.7.17 are no
+longer supported. Update both peers before upgrading this adapter. The adapter fixes do not
+change the stored document format; the separate 0.4.x account-key migration below still applies.
 
 ## Quick start
 
@@ -150,9 +156,9 @@ if you want the startup warning to track it, and this layout is what makes the d
 The trade is the same one `sessionPartition` makes: resolving an account by provider becomes
 partition-scoped, while listing or deleting a user's accounts by `userId` becomes cross-partition.
 It defaults to `"id"`, so existing deployments are unchanged. `accountKey` refuses an account schema
-with a required `issuer` field, including Better Auth 1.7.0-1.7.2, because the provider-based key
-cannot enforce those versions' identity guarantee. Use Better Auth 1.6.x or 1.7.3+ without that
-legacy requirement, or choose `"id"` with no database-enforced account identity uniqueness.
+with a required legacy `issuer` field, because the provider-based key cannot enforce an
+issuer-based identity guarantee. Use the supported Better Auth provider-based schema without
+that legacy requirement, or choose `"id"` with no database-enforced account identity uniqueness.
 `accountKey` requires `providerId` and `accountId` to keep their default stored field names; a
 `fields` mapping that renames either is refused at construction.
 
@@ -163,6 +169,14 @@ default model names to `ensureAuthContainers`. The `/id` strategies continue to 
 field mappings. Updates, bulk updates, and `incrementOne` all reject changes that would move a
 document to another partition.
 
+**Mapped and custom fields.** Stored model and field names must remain distinct, but they may
+match another model's or field's logical name. Predicates, joins and counter mutations use Better
+Auth's already-transformed stored names; projections and ordering are mapped once using the logical
+model identity. Custom underscore-prefixed fields are preserved. Cosmos system properties
+(`_rid`, `_self`, `_etag`, `_attachments`, `_ts`, `_lsn`) remain reserved, and each layout's
+storage-only fields are hidden only on the model that owns them. For example, hashing sessions
+does not hide an unrelated `user.tokenHash` field.
+
 Both a partition key and a unique key policy are **immutable after a container is created**, so this
 is a decision to make before `ensureAuthContainers` first runs. `single-container` cannot enforce it
 at all: that layout partitions on `[docModel, id]`, giving every row its own logical partition.
@@ -172,9 +186,9 @@ at all: that layout partitions on `[docModel, id]`, giving every row its own log
 > [account-schema post](https://better-auth.com/blog/1-7-account-schema)). An `account` container
 > created by 0.4.x therefore carries `accountKeyHash` values and a `["/issuer", "/accountId"]` unique
 > key policy that this version does not produce. `ensureAuthContainers` refuses such a container, but
-> the adapter itself does not inspect containers at runtime -- against an unconverted container every
+> the adapter itself does not validate partition or unique-key policies at runtime -- against an unconverted container every
 > account lookup misses silently and sign-in creates duplicate users -- so run `ensureAuthContainers`
-> before 0.5.0 serves traffic. Export the accounts, drop the container, let `ensureAuthContainers`
+> before the upgraded application serves traffic. Export the accounts, drop the container, let `ensureAuthContainers`
 > recreate it, and re-import with the old `accountKeyHash` and `issuer` fields stripped so the new
 > hash is stamped on write; there is no in-place migration because both the partition key and the
 > unique key policy are immutable.
@@ -200,6 +214,13 @@ Cosmos permits at most ten patch operations per document. Wider `incrementOne` m
 ETag-protected document replacement with the same retry and partition checks; they are never split
 into separate, partially applied writes.
 
+**Conditional deletes.** Both single and bulk deletes use an `If-Match` ETag per document. After
+a conflict, the adapter rechecks the complete original predicate against the same document ID.
+A row that no longer matches is preserved and is not included in the deleted count. A row that
+still matches is retried, with an explicit error after 16 contended attempts rather than a false
+success. Bulk deletion is still not a transaction: an error on a later row does not roll back
+earlier deletions.
+
 **Uniqueness.** Cosmos unique key policies are enforced *within a logical partition*, so a declared
 constraint is enforced only where the partition key is derived from exactly the constrained fields.
 `accountPartition: "accountKey"` does that for `(providerId, accountId)` and `rateLimitPartition: "key"`
@@ -209,25 +230,36 @@ existence checks, and the database will not be the final arbiter of, for example
 under a race. At construction the adapter warns, naming exactly the constraints the *active* layout
 leaves unenforced.
 
-**Query cost.** Only a lookup by `id` is a point read. Every other `where` becomes a query. Under
-the `single-container` layout those queries are scoped by the model prefix of the partition key,
-and sessions can be scoped further — see [Sessions on `/tokenHash`](#sessions-on-tokenhash).
+**Query cost.** Only an ID-addressable lookup by `id` is a point read. A missing point-read target
+also checks container metadata so that a missing database or container raises an error instead of
+looking like a missing document. Every other `where` becomes a query. Single-container queries
+include the model discriminator, while known account, session and rate-limit hashes can scope
+queries to their logical partitions — see [Sessions on `/tokenHash`](#sessions-on-tokenhash).
 
 ## Testing
 
 The suite runs against the Cosmos DB emulator:
 
 ```bash
+npm ci
 npm run emulator:up
-npm test
+npm run verify
 npm run emulator:down
 ```
 
 Point it at a real account instead with `COSMOS_ENDPOINT`, `COSMOS_KEY` and `COSMOS_DATABASE`.
+Tests create and delete their databases; use only a dedicated test account.
 
 It runs Better Auth's own `normal`, `authFlow`, `caseInsensitive` and `joins` conformance suites,
-once per layout, plus routing tests that assert which queries reach a single partition. The
+once per layout, plus routing, field-mapping, serialization and concurrent mutation regressions.
+CI runs the suite on Node 22, 24 and 26. The emulator health check waits for the database-ready
+endpoint, not just its TLS certificate. The
 `numberId` and `transactions` suites are intentionally not run — see the table above.
+
+`npm run test:package` checks the built ESM/CommonJS entrypoints and declaration paths without
+requiring Cosmos. `npm run verify` includes this check. Declaration generation uses
+`isolatedDeclarations`, avoiding a dependency on the native TypeScript compiler's experimental
+declaration-generation API. Node typings stay on the supported Node 22 API baseline.
 
 ## License
 

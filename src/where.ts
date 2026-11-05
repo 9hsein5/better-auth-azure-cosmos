@@ -87,9 +87,8 @@ export type FieldMapper = (field: string) => string;
 function clauseToSql(
 	clause: CleanedWhere,
 	collector: ParameterCollector,
-	mapField: FieldMapper,
 ): string {
-	const path = quoteFieldPath(mapField(clause.field));
+	const path = quoteFieldPath(clause.field);
 	const insensitive = isInsensitiveStringClause(clause);
 	const caseArgument = insensitive ? ", true" : "";
 	const operator = clause.operator ?? "eq";
@@ -150,13 +149,12 @@ function clauseToSql(
 export function buildWherePredicate(
 	where: readonly CleanedWhere[],
 	collector: ParameterCollector,
-	mapField: FieldMapper,
 ): string {
 	const conjunctions: string[] = [];
 	const disjunctions: string[] = [];
 
 	for (const clause of where) {
-		const text = clauseToSql(clause, collector, mapField);
+		const text = clauseToSql(clause, collector);
 		if (clause.connector === "OR") {
 			disjunctions.push(text);
 		} else {

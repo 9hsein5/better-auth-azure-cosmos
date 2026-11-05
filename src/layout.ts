@@ -74,10 +74,10 @@ export type CosmosLayoutOptions =
 			 * `sha256(providerId NUL accountId)`, and creates the container with a unique key
 			 * policy on `["/providerId", "/accountId"]`.
 			 *
-			 * A Cosmos unique key is only enforced within a logical partition, so this is what
-			 * makes the `["providerId", "accountId"]` uniqueness Better Auth declares actually
-			 * enforceable. Resolving an account by provider becomes partition-scoped; listing a
-			 * user's accounts becomes cross-partition.
+			 * A Cosmos unique key is only enforced within a logical partition, so this makes an
+			 * application-declared `["providerId", "accountId"]` index enforceable. Resolving an
+			 * account by provider becomes partition-scoped; listing a user's accounts becomes
+			 * cross-partition.
 			 *
 			 * Both the partition key and the unique key policy are immutable after a container
 			 * is created, so this must be chosen up front. Containers created by 0.4.x hashed
@@ -218,6 +218,20 @@ function accountScopesOf(where: readonly CleanedWhere[]): readonly PartitionKey[
 
 /** The fields whose hash forms the account partition key, and thus the only enforceable pair. */
 export const ACCOUNT_KEY_FIELDS: readonly string[] = [ACCOUNT_PROVIDER_ID_FIELD, ACCOUNT_ID_FIELD];
+
+export function reservedFieldsForModel(layout: CosmosLayout, model: string): readonly string[] {
+	if (layout.modelField !== null) {
+		return layout.reservedFields;
+	}
+	const field = model === SESSION_MODEL
+		? SESSION_TOKEN_HASH_FIELD
+		: model === ACCOUNT_MODEL
+			? ACCOUNT_KEY_HASH_FIELD
+			: model === RATE_LIMIT_MODEL
+				? RATE_LIMIT_KEY_HASH_FIELD
+				: undefined;
+	return layout.reservedFields.filter((reserved) => reserved === field);
+}
 
 export function resolveLayout(
 	database: Database,

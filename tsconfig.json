@@ -14,6 +14,7 @@
     "noImplicitReturns": true,
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
+    "isolatedDeclarations": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "declaration": true,

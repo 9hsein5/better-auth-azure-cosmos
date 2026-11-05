@@ -1,4 +1,125 @@
-# Validation Report: 0.5.1
+# Validation Report
+
+## 0.6.0 release verification (2026-11-05)
+
+The previously tested adapter fixes below are prepared as **0.6.0**. The minor version
+marks the stricter peer/runtime requirements. Typecheck, ESM/CommonJS and declaration
+builds, both package smoke tests, and the dependency audit pass. The local package
+preview contains exactly seven intended files and no bundled dependencies.
+
+An isolated consumer rehearsal with the actual 0.6.0 tarball and Better Auth/passkey
+1.7.17 passed 207 application-specific unit/emulator tests plus dependency builds and
+test typechecking. A final eight-case session-administration rerun also passed,
+including an acknowledgement-failure regression. These checks are separate from the
+adapter's 590-case suite and do not certify every application/provider configuration.
+
+Publication uses the existing GitHub release workflow, which requires the full test
+matrix on Node 22, 24 and 26 before publishing with provenance. The registry and release
+workflow are the source of truth for publication status.
+
+## Current working tree: dependency and correctness update
+
+Date: 2026-11-04. These results cover the updated working tree, not a published release.
+The tested working-tree package version was `0.5.1`; the later 0.6.0 preparation is
+recorded above. No commit, release, or npm publication was created.
+
+### Changes verified
+
+- Better Auth/core/test utilities are aligned at 1.7.17; Cosmos SDK is 4.10.1,
+  Vitest is 5.1.0, tsdown is 0.23.5, and TypeScript is 7.0.2.
+- Peer minimums are now Better Auth 1.7.17 and Cosmos SDK 4.10.1. Supported Node
+  lines are 22.18+, 24.11+, and 26+. Node typings remain at the Node 22 API baseline.
+  These minimums intentionally remove the old Node 20 and Better Auth 1.6 support.
+- Predicates, joins, increment keys, and absolute assignments are no longer
+  remapped after Better Auth has transformed them. Projections and ordering use
+  the logical model identity, including when a physical model name matches
+  another schema key.
+- Only actual Cosmos system properties and a model's own layout fields are
+  removed from returned records. Custom underscore-prefixed fields and unrelated
+  fields named `tokenHash`, `accountKeyHash`, or `keyHash` survive every result path.
+- Deletes use ETags, recheck the complete predicate against the same document ID,
+  and retry bounded contention. Rows that stop matching are retained, bulk counts
+  remain accurate, and exhaustion throws instead of reporting success.
+- A point-read 404 checks container metadata before returning `null`, so missing
+  containers are no longer mistaken for missing documents.
+- ESM/CommonJS output names match the package exports. `isolatedDeclarations`
+  enables Oxc declaration generation without the deprecated TypeScript 7.0
+  declaration backend. CommonJS support is intentionally retained despite
+  tsdown's general recommendation to prefer ESM.
+- CI now covers Node 22, 24, and 26, checks package entrypoints, and waits for
+  database readiness rather than merely the emulator's TLS certificate.
+
+### Regression and runtime results
+
+Before the source fixes, the initial 41-case regression suite failed 29 cases.
+The completed regression file contains 42 passing cases, including an additional
+check that a retried single delete never switches to a different matching row.
+
+| Platform | Node | Full Vitest suite |
+| --- | --- | --- |
+| Windows x64, emulated on ARM64 | 22.23.4 | 590 passed, 0 failed, 0 skipped |
+| Windows x64, emulated on ARM64 | 24.22.2 | 590 passed, 0 failed, 0 skipped |
+| Windows x64, emulated on ARM64 | 26.13.0 | 590 passed, 0 failed, 0 skipped |
+| Windows ARM64, native | 24.22.2 | 590 passed, 0 failed, 0 skipped |
+| Linux ARM64, native container | 26.10.0 | 590 passed, 0 failed, 0 skipped |
+
+Five additional shuffled runs of the seven routing, startup, mutation, and
+regression files passed all 114 cases each, using seeds 1 through 5. That is
+570 additional passing executions, for 3,520 across the full matrix and shuffle
+runs. This counts repetitions, not 3,520 distinct scenarios.
+
+Typechecking passed through TypeScript 6.0.3 before advancing to 7.0.2. ESM,
+CommonJS, and declaration builds pass, as do the two permanent package smoke
+tests. Fresh frozen-lockfile installs pass with npm 10.9.9 on Windows and npm
+11.19.1 in the Linux container.
+
+The Windows workspace now has native ARM64 tooling installed. Its normal
+typecheck, build, and package-smoke commands pass, and VS Code reports no errors.
+The host's pre-release Node 27 also passed these CLI sanity checks, but it is not
+part of the supported stable-runtime matrix above.
+
+### Real package-consumer checks
+
+The actual seven-file tarball was installed into a clean consumer:
+
+- ESM and CommonJS expose the same public exports.
+- Both consumer declaration-resolution modes typecheck under TypeScript 7 with
+  NodeNext module resolution.
+- The package contains its four build outputs, README, LICENSE, and manifest;
+  no regression probes, test files, or dependencies are bundled.
+- The final development dependency graph and the consumer's production graph
+  both report zero npm audit vulnerabilities.
+- All three layouts preserve custom fields and select/update the correct records
+  under colliding logical/stored field names.
+- Each layout retains 128 simultaneous ID-selected increments, admits exactly
+  seven of 64 guarded increments, and returns one winner from 64 concurrent
+  single-use verification consumptions.
+
+For 32 concurrent eleven-field mutations, the single-container, ID, and hashed
+layouts committed 18, 23, and 22 calls respectively. Their remaining 14, 9, and
+10 calls explicitly rejected exhausted contention. Every field equaled the
+successful-call count; there were no partial writes or silently lost successful
+increments. These intentional bounded-retry errors are not a claim that every
+request succeeds under arbitrarily high contention.
+
+All data tests used a task-owned local HTTPS emulator, version EN20260907.
+Production Azure resources and unrelated containers were not changed. Temporary
+consumer installations, runtime downloads, and the task-owned emulator are
+cleaned up after validation.
+
+### Remaining limitations
+
+This is not certification of every provider/plugin configuration or production
+Azure behavior. Real-account RU costs, throttling, indexing enforcement,
+multi-region consistency/failover, and the 0.4.x account-key migration rehearsal
+remain separate staging checks. Existing transaction and global-uniqueness
+limitations described in the README are unchanged. GitHub-hosted CI itself was
+not run during these local checks.
+
+## Historical 0.5.1 release validation
+
+The remaining sections record the 2026-09-10 work. Their older dependency
+versions, support matrix, and local installation status are historical.
 
 Date: 2026-09-10.
 

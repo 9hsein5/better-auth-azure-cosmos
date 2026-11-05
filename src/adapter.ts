@@ -23,6 +23,7 @@ import {
 } from "./document";
 import {
 	ACCOUNT_KEY_FIELDS,
+	reservedFieldsForModel,
 	resolveLayout,
 	type CosmosLayout,
 	type CosmosLayoutOptions,
@@ -43,7 +44,7 @@ import {
 
 const NOT_FOUND = 404;
 const PRECONDITION_FAILED = 412;
-const MAX_INCREMENT_ATTEMPTS = 16;
+const MAX_MUTATION_ATTEMPTS = 16;
 
 export type CosmosAdapterConfig = {
 	readonly layout?: CosmosLayoutOptions;
@@ -74,13 +75,7 @@ function projectDocument(
 		return document;
 	}
 	const allowed = new Set([...select, ...keep]);
-	const result: AuthDocument = {};
-	for (const [key, value] of Object.entries(document)) {
-		if (allowed.has(key)) {
-			result[key] = value;
-		}
-	}
-	return result;
+	return Object.fromEntries(Object.entries(document).filter(([key]) => allowed.has(key)));
 }
 
 function isStatus(error: unknown, status: number): boolean {
@@ -123,7 +118,6 @@ function buildQuery(
 	layout: CosmosLayout,
 	model: string,
 	shape: QueryShape,
-	mapField: FieldMapper,
 ): { query: string; parameters: SqlParameter[] } {
 	const collector = createParameterCollector("p");
 	const clauses: string[] = [];
@@ -132,7 +126,7 @@ function buildQuery(
 		clauses.push(`${quoteFieldPath(layout.modelField)} = @model`);
 	}
 
-	const predicate = buildWherePredicate(shape.where, collector, mapField);
+	const predicate = buildWherePredicate(shape.where, collector);
 	if (predicate.length > 0) {
 		clauses.push(predicate);
 	}
@@ -150,7 +144,7 @@ function buildQuery(
 
 	if (shape.sortBy) {
 		const direction = shape.sortBy.direction === "desc" ? "DESC" : "ASC";
-		query += ` ORDER BY ${quoteFieldPath(mapField(shape.sortBy.field))} ${direction}`;
+		query += ` ORDER BY ${quoteFieldPath(shape.sortBy.field)} ${direction}`;
 	}
 
 	const hasLimit = typeof shape.limit === "number" && Number.isFinite(shape.limit);
@@ -176,9 +170,8 @@ async function queryDocuments(
 	layout: CosmosLayout,
 	model: string,
 	shape: QueryShape,
-	mapField: FieldMapper,
 ): Promise<StoredAuthDocument[]> {
-	const spec = buildQuery(layout, model, shape, mapField);
+	const spec = buildQuery(layout, model, shape);
 	const scopes = layout.scopesOf(model, shape.where);
 
 	// Paging has no defined order across partitions, so a multi-partition fan-out cannot honour it;
@@ -204,9 +197,8 @@ async function countDocuments(
 	layout: CosmosLayout,
 	model: string,
 	where: readonly CleanedWhere[],
-	mapField: FieldMapper,
 ): Promise<number> {
-	const spec = buildQuery(layout, model, { where, count: true }, mapField);
+	const spec = buildQuery(layout, model, { where, count: true });
 	const tallies = await fetchAll<number>(layout, model, spec, layout.scopesOf(model, where));
 	return tallies.reduce((total, tally) => total + tally, 0);
 }
@@ -266,31 +258,66 @@ async function readOne(
 	layout: CosmosLayout,
 	model: string,
 	where: readonly CleanedWhere[],
-	mapField: FieldMapper,
 ): Promise<StoredAuthDocument | null> {
 	const id = layout.addressableById(model) ? pointReadId(where) : null;
 	if (id !== null) {
-		try {
-			const response = await layout
-				.container(model)
-				.item(id, layout.partitionKeyOf(model, { id }))
-				.read<StoredAuthDocument>();
-			return response.resource ?? null;
-		} catch (error) {
-			if (isStatus(error, NOT_FOUND)) {
-				return null;
-			}
-			throw error;
+		const container = layout.container(model);
+		const response = await container
+			.item(id, layout.partitionKeyOf(model, { id }))
+			.read<StoredAuthDocument>();
+		if (response.resource) {
+			return response.resource;
 		}
+		if (response.statusCode !== NOT_FOUND) {
+			throw new Error(`Cosmos returned no document for ${model} with status ${response.statusCode}.`);
+		}
+		// Item.read also returns an empty 404 when the parent container is missing.
+		await container.read();
+		return null;
 	}
 
 	const documents = await queryDocuments(
 		layout,
 		model,
 		{ where, limit: 1 },
-		mapField,
 	);
 	return documents[0] ?? null;
+}
+
+async function deleteDocument(
+	layout: CosmosLayout,
+	model: string,
+	where: readonly CleanedWhere[],
+	stored: StoredAuthDocument,
+): Promise<boolean> {
+	const guardedWhere: readonly CleanedWhere[] = pointReadId(where) === stored.id ? where : [
+		...where,
+		{ field: "id", value: stored.id, operator: "eq", connector: "AND", mode: "sensitive" },
+	];
+	let current: StoredAuthDocument | null = stored;
+	for (let attempt = 0; attempt < MAX_MUTATION_ATTEMPTS; attempt += 1) {
+		if (attempt > 0) {
+			current = await readOne(layout, model, guardedWhere);
+		}
+		if (current === null) {
+			return false;
+		}
+		try {
+			await layout
+				.container(model)
+				.item(current.id, layout.partitionKeyOf(model, current))
+				.delete({ accessCondition: { type: "IfMatch", condition: current._etag } });
+			return true;
+		} catch (error) {
+			if (isStatus(error, NOT_FOUND)) {
+				return false;
+			}
+			if (!isStatus(error, PRECONDITION_FAILED)) {
+				throw error;
+			}
+		}
+	}
+	throw new Error(`Could not delete ${model} after repeated concurrent changes. Retry the operation.`);
 }
 
 /**
@@ -302,10 +329,6 @@ function asResult<T>(document: AuthDocument): T {
 	return document as T;
 }
 
-/**
- * Shape of the declared schema this adapter needs, written structurally so it satisfies both the
- * 1.6 and 1.7 type definitions -- `indexes` is optional, and 1.6 simply never declares any.
- */
 type DeclaredSchema = Record<
 	string,
 	{
@@ -320,8 +343,8 @@ type DeclaredSchema = Record<
 /**
  * A Cosmos unique key is scoped to a logical partition, so a constraint Better Auth declares
  * globally holds only where the partition key is derived from exactly the constrained fields.
- * `accountPartition: "accountKey"` does that for `(providerId, accountId)`; nothing else does, so
- * `user.email` and the rest fall back to Better Auth's own existence checks.
+ * The account and rate-limit hash strategies enforce their matching identity keys;
+ * `user.email` and the remaining constraints fall back to Better Auth's own existence checks.
  *
  * Silence would read as protection, but so would a false alarm read as noise: naming a
  * constraint the database does enforce teaches operators to ignore the warning and to add
@@ -366,7 +389,7 @@ function assertPartitionStrategiesSupported(
 	}
 	if (layout.accountPartition === "accountKey" && schema[ACCOUNT_MODEL]?.fields["issuer"]?.required) {
 		throw new Error(
-			'accountPartition: "accountKey" cannot enforce an issuer-based account schema. Use Better Auth 1.6.x or 1.7.3+ without a required legacy issuer field, or use accountPartition: "id" without database-enforced identity uniqueness.',
+			'accountPartition: "accountKey" cannot enforce an issuer-based account schema. Use Better Auth 1.7.17+ without a required legacy issuer field, or use accountPartition: "id" without database-enforced identity uniqueness.',
 		);
 	}
 	const strategies = [
@@ -413,29 +436,27 @@ export function cosmosAdapter(
 			// document here has its own. consumeOne covers the case needing atomicity.
 			transaction: false,
 		},
-		adapter: ({ getFieldName, getModelName, getDefaultModelName, schema }) => {
+		adapter: ({ getFieldName, getModelName, schema }) => {
 			assertPartitionStrategiesSupported(config.layout, schema, getModelName, getFieldName);
 			warnUnenforceableUniqueness(schema, layout);
 
+			// The factory maps predicates, joins and mutation keys; only select and sortBy remain logical.
 			const mapperFor =
 				(model: string): FieldMapper =>
 				(field) =>
 					getFieldName({ model, field });
 
-			/** A unique foreign field means the relation resolves to a single row. */
-			const isUniqueJoinField = (joinModel: string, field: string): boolean =>
-				schema[getDefaultModelName(joinModel)]?.fields[field]?.unique === true;
+			const toDocument = (model: string, stored: StoredAuthDocument): AuthDocument =>
+				toAuthDocument(stored, reservedFieldsForModel(layout, model));
 
 			async function applyJoins(
-				model: string,
 				document: AuthDocument,
 				join: JoinConfig,
 			): Promise<AuthDocument> {
 				const joined: AuthDocument = { ...document };
 
 				for (const [joinModel, joinConfig] of Object.entries(join)) {
-					const sourceValue =
-						document[getFieldName({ model, field: joinConfig.on.from })];
+					const sourceValue = document[joinConfig.on.from];
 					if (
 						typeof sourceValue !== "string" &&
 						typeof sourceValue !== "number"
@@ -443,7 +464,7 @@ export function cosmosAdapter(
 						continue;
 					}
 
-					const unique = isUniqueJoinField(joinModel, joinConfig.on.to);
+					const unique = joinConfig.relation === "one-to-one";
 					// An absent limit means unbounded, matching the first-party adapters.
 					const bounded = !unique && typeof joinConfig.limit === "number";
 					const related = await queryDocuments(
@@ -462,11 +483,10 @@ export function cosmosAdapter(
 							...(unique ? { limit: 1 } : {}),
 							...(bounded ? { limit: joinConfig.limit } : {}),
 						},
-						mapperFor(joinModel),
 					);
 
 					const records = related.map((record) =>
-						toAuthDocument(record, layout.reservedFields),
+						toDocument(joinModel, record),
 					);
 					joined[joinModel] = unique ? (records[0] ?? null) : records;
 				}
@@ -488,42 +508,41 @@ export function cosmosAdapter(
 				return data;
 			},
 
-			async findOne({ model, where, select, join }) {
-				const mapField = mapperFor(model);
+			async findOne({ model, modelKey, where, select, join }) {
+				const mapField = mapperFor(modelKey ?? model);
 				const mappedSelect = select?.map(mapField);
-				const stored = await readOne(layout, model, where, mapField);
+				const stored = await readOne(layout, model, where);
 				if (stored === null) {
 					return null;
 				}
-				const document = toAuthDocument(stored, layout.reservedFields);
+				const document = toDocument(model, stored);
 				if (!join) {
 					return asResult(projectDocument(document, mappedSelect));
 				}
-				const joined = await applyJoins(model, document, join);
+				const joined = await applyJoins(document, join);
 				return asResult(
 					projectDocument(joined, mappedSelect, Object.keys(join)),
 				);
 			},
 
-			async findMany({ model, where, limit, select, sortBy, offset, join }) {
-				const mapField = mapperFor(model);
+			async findMany({ model, modelKey, where, limit, select, sortBy, offset, join }) {
+				const mapField = mapperFor(modelKey ?? model);
 				const mappedSelect = select?.map(mapField);
 				const documents = await queryDocuments(
 					layout,
 					model,
 					{
 						where: where ?? [],
-						...(sortBy ? { sortBy } : {}),
+						...(sortBy ? { sortBy: { ...sortBy, field: mapField(sortBy.field) } } : {}),
 						...(typeof offset === "number" ? { offset } : {}),
 						// A join needs its source field, which a projection could drop.
 						...(mappedSelect && !join ? { select: mappedSelect } : {}),
 						limit,
 					},
-					mapField,
 				);
 
 				const records = documents.map((record) =>
-					toAuthDocument(record, layout.reservedFields),
+					toDocument(model, record),
 				);
 				if (!join) {
 					return records.map((record) =>
@@ -533,7 +552,7 @@ export function cosmosAdapter(
 
 				const keep = Object.keys(join);
 				const joined = await Promise.all(
-					records.map((record) => applyJoins(model, record, join)),
+					records.map((record) => applyJoins(record, join)),
 				);
 				return joined.map((record) =>
 					asResult(projectDocument(record, mappedSelect, keep)),
@@ -541,13 +560,12 @@ export function cosmosAdapter(
 			},
 
 			async count({ model, where }) {
-				return countDocuments(layout, model, where ?? [], mapperFor(model));
+				return countDocuments(layout, model, where ?? []);
 			},
 
 			async incrementOne({ model, where, increment, set }) {
-				const mapField = mapperFor(model);
-				for (let attempt = 0; attempt < MAX_INCREMENT_ATTEMPTS; attempt += 1) {
-					const stored = await readOne(layout, model, where, mapField);
+				for (let attempt = 0; attempt < MAX_MUTATION_ATTEMPTS; attempt += 1) {
+					const stored = await readOne(layout, model, where);
 					if (stored === null) {
 						return null;
 					}
@@ -555,9 +573,9 @@ export function cosmosAdapter(
 					const operations: PatchOperation[] = [];
 					const next: StoredAuthDocument = { ...stored };
 					for (const [field, value] of Object.entries(increment)) {
-						const path = patchPath(mapField(field));
-						const current = stored[path.slice(1)];
-						next[path.slice(1)] = (typeof current === "number" ? current : 0) + value;
+						const path = patchPath(field);
+						const current = stored[field];
+						next[field] = (typeof current === "number" ? current : 0) + value;
 						operations.push(
 							typeof current === "number"
 								? { op: "incr", path, value }
@@ -565,16 +583,15 @@ export function cosmosAdapter(
 						);
 					}
 					for (const [field, value] of Object.entries(set ?? {})) {
-						const storedField = mapField(field);
-						next[storedField] = value as AuthFieldValue;
+						next[field] = value as AuthFieldValue;
 						operations.push({
 							op: "set",
-							path: patchPath(storedField),
+							path: patchPath(field),
 							value: value as AuthFieldValue,
 						});
 					}
 					if (operations.length === 0) {
-						return asResult(toAuthDocument(stored, layout.reservedFields));
+						return asResult(toDocument(model, stored));
 					}
 
 					assertPartitionUnchanged(layout, model, stored, { ...next, ...layout.stamp(model, next) });
@@ -594,7 +611,7 @@ export function cosmosAdapter(
 								needsSnapshot ? snapshotOptions : undefined,
 							);
 						return response.resource
-							? asResult(toAuthDocument(response.resource, layout.reservedFields))
+							? asResult(toDocument(model, response.resource))
 							: null;
 					} catch (error) {
 						if (isStatus(error, PRECONDITION_FAILED)) {
@@ -611,7 +628,7 @@ export function cosmosAdapter(
 
 
 			async update({ model, where, update }) {
-				const stored = await readOne(layout, model, where, mapperFor(model));
+				const stored = await readOne(layout, model, where);
 				if (stored === null) {
 					return null;
 				}
@@ -627,7 +644,7 @@ export function cosmosAdapter(
 				if (!response.resource) {
 					return null;
 				}
-				return asResult(toAuthDocument(response.resource, layout.reservedFields));
+				return asResult(toDocument(model, response.resource));
 			},
 
 			async updateMany({ model, where, update }) {
@@ -635,7 +652,6 @@ export function cosmosAdapter(
 					layout,
 					model,
 					{ where },
-					mapperFor(model),
 				);
 				let updated = 0;
 				for (const stored of documents) {
@@ -660,20 +676,11 @@ export function cosmosAdapter(
 			},
 
 			async delete({ model, where }) {
-				const stored = await readOne(layout, model, where, mapperFor(model));
+				const stored = await readOne(layout, model, where);
 				if (stored === null) {
 					return;
 				}
-				try {
-					await layout
-						.container(model)
-						.item(stored.id, layout.partitionKeyOf(model, stored))
-						.delete();
-				} catch (error) {
-					if (!isStatus(error, NOT_FOUND)) {
-						throw error;
-					}
-				}
+				await deleteDocument(layout, model, where, stored);
 			},
 
 			async deleteMany({ model, where }) {
@@ -681,20 +688,11 @@ export function cosmosAdapter(
 					layout,
 					model,
 					{ where },
-					mapperFor(model),
 				);
 				let deleted = 0;
 				for (const stored of documents) {
-					try {
-						await layout
-							.container(model)
-							.item(stored.id, layout.partitionKeyOf(model, stored))
-							.delete();
+					if (await deleteDocument(layout, model, where, stored)) {
 						deleted += 1;
-					} catch (error) {
-						if (!isStatus(error, NOT_FOUND)) {
-							throw error;
-						}
 					}
 				}
 				return deleted;
@@ -705,7 +703,7 @@ export function cosmosAdapter(
 			 * the same document, but only the first delete matches the revision.
 			 */
 			async consumeOne({ model, where }) {
-				const stored = await readOne(layout, model, where, mapperFor(model));
+				const stored = await readOne(layout, model, where);
 				if (stored === null) {
 					return null;
 				}
@@ -722,7 +720,7 @@ export function cosmosAdapter(
 					}
 					throw error;
 				}
-				return asResult(toAuthDocument(stored, layout.reservedFields));
+				return asResult(toDocument(model, stored));
 			},
 			};
 		},

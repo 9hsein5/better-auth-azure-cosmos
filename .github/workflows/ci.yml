@@ -8,22 +8,32 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24, 26]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      - run: npm run test:package
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24, 26]
     services:
       cosmos:
         image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview
         ports:
+          - 8080:8080
           - 8081:8081
         env:
           PROTOCOL: https
@@ -31,13 +41,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - name: Wait for the emulator
         run: |
           for i in $(seq 1 60); do
-            if curl -ksf https://localhost:8081/_explorer/emulator.pem > /dev/null; then
+            if curl -fsS http://localhost:8080/ready | jq -e '.ready == true' > /dev/null; then
               echo "emulator ready"; exit 0
             fi
             sleep 5

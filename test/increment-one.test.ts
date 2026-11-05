@@ -6,10 +6,6 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { cosmosAdapter, ensureAuthContainers } from "../src/index";
 
-/**
- * `incrementOne` is optional in Better Auth 1.6 and required from 1.7, and the official conformance
- * suites do not exercise it, so its semantics are pinned here.
- */
 const EMULATOR_ENDPOINT = "https://localhost:8081";
 const EMULATOR_KEY =
 	"C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==";

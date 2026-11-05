@@ -97,7 +97,7 @@ describe("declared uniqueness that Cosmos cannot enforce", () => {
 	it("gates accountKey against the installed identity schema without a connection", () => {
 		const constructAdapter = () => construct(enforcingLayout);
 		if (getAuthTables({})["account"]?.fields["issuer"]?.required) {
-			expect(constructAdapter).toThrow(/issuer.*1\.7\.3/u);
+			expect(constructAdapter).toThrow(/issuer.*1\.7\.17/u);
 		} else {
 			expect(constructAdapter).not.toThrow();
 		}
@@ -111,7 +111,7 @@ describe("declared uniqueness that Cosmos cannot enforce", () => {
 				schema: { account: { fields: { issuer: { type: "string", required: true } } } },
 			}],
 		};
-		expect(() => construct(enforcingLayout, options)).toThrow(/issuer.*1\.7\.3/u);
+		expect(() => construct(enforcingLayout, options)).toThrow(/issuer.*1\.7\.17/u);
 		expect(() => construct(layout, options)).not.toThrow();
 	});
 

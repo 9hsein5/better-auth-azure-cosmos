@@ -3,8 +3,9 @@ import { defineConfig } from "tsdown";
 export default defineConfig({
 	entry: ["src/index.ts"],
 	format: ["esm", "cjs"],
+	fixedExtension: false,
 	dts: true,
 	clean: true,
 	treeshake: true,
-	external: ["@azure/cosmos", "better-auth"],
+	deps: { neverBundle: ["@azure/cosmos", "better-auth"] },
 });
