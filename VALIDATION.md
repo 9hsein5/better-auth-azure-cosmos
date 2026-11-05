@@ -17,6 +17,12 @@ Publication uses the existing GitHub release workflow, which requires the full t
 matrix on Node 22, 24 and 26 before publishing with provenance. The registry and release
 workflow are the source of truth for publication status.
 
+The publishing job uses npm trusted publishing (GitHub OIDC), not `NPM_TOKEN`.
+Its Node 24.22.2 runtime bundles npm 11.19.1, satisfying npm's OIDC minimum of
+npm 11.5.1 and Node 22.14. The package's trusted-publisher connection must name
+`9hsein5/better-auth-azure-cosmos` and `publish.yml`, with no GitHub environment
+restriction because the job declares no environment. Publishing caches are disabled.
+
 The initial hosted run caught an emulator-version difference before any npm upload:
 EN20261019 returns HTTP 400/substatus 1003 for a missing container's query plan, whereas
 EN20260907 returned 404. Direct SDK probes reproduced the difference; metadata and
